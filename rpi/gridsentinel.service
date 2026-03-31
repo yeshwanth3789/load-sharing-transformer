@@ -1,0 +1,15 @@
+[Unit]
+Description=GridSentinel Flask Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Desktop/load-sharing-transformer/rpi
+ExecStart=/bin/bash /home/pi/Desktop/load-sharing-transformer/rpi/start_server.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

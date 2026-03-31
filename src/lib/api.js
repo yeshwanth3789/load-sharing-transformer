@@ -1,5 +1,6 @@
-// Flask server base URL - update this to match your RPi's IP on the local network
-export const FLASK_BASE_URL = 'http://raspberrypi.local:5000'
+// Flask server base URL — set NEXT_PUBLIC_FLASK_URL in .env.local
+// e.g. NEXT_PUBLIC_FLASK_URL=http://10.198.46.159:5000
+export const FLASK_BASE_URL = process.env.NEXT_PUBLIC_FLASK_URL || 'http://raspberrypi.local:5000'
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
 
