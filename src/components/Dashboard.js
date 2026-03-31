@@ -9,6 +9,7 @@ import AlertFeed from './AlertFeed'
 import LiveChart from './LiveChart'
 import ScenarioPanel from './ScenarioPanel'
 import CircuitDiagram from './CircuitDiagram'
+import LoadDistribution from './LoadDistribution'
 import { fetchStatus, sendSwitch, sendMode, getMockStatus } from '@/lib/api'
 
 const POLL_INTERVAL = 3000
@@ -32,7 +33,16 @@ function applyScenario(id, base) {
     case 'ps1_fault':
       return {
         ...base,
-        ps1: { ...base.ps1, voltage: 0, current: 0, power: 0, frequency: 0, pf: 0 },
+        ps1: { ...base.ps1, voltage: 0, current: 0, power: 0, frequency: 0, pf: 0, energy: base.ps1.energy },
+        ps2: {
+          voltage: parseFloat((226 + Math.random() * 5).toFixed(1)),
+          current: parseFloat((8 + Math.random() * 4).toFixed(2)),
+          power: parseFloat((226 * 10 * 0.96).toFixed(1)),
+          energy: parseFloat((12.4 + Math.random() * 0.1).toFixed(2)),
+          frequency: parseFloat((49.8 + Math.random() * 0.3).toFixed(1)),
+          pf: parseFloat((0.94 + Math.random() * 0.04).toFixed(2)),
+          sensor_connected: true,
+        },
         active_source: 2,
         relays: { ps1_l: false, ps1_n: false, ps2_l: true, ps2_n: true },
       }
@@ -49,7 +59,15 @@ function applyScenario(id, base) {
         active_source: 2,
         mode: 'manual',
         relays: { ps1_l: false, ps1_n: false, ps2_l: true, ps2_n: true },
-        ps2: { ...base.ps2, sensor_connected: false },
+        ps2: {
+          voltage: parseFloat((230 + Math.random() * 4).toFixed(1)),
+          current: parseFloat((7 + Math.random() * 3).toFixed(2)),
+          power: parseFloat((230 * 8.5 * 0.95).toFixed(1)),
+          energy: parseFloat((8.7 + Math.random() * 0.1).toFixed(2)),
+          frequency: parseFloat((50.0 + Math.random() * 0.2).toFixed(1)),
+          pf: parseFloat((0.93 + Math.random() * 0.05).toFixed(2)),
+          sensor_connected: true,
+        },
       }
 
     case 'ps1_restore':
@@ -204,7 +222,10 @@ export default function Dashboard() {
           <PowerSourceCard id={2} data={status.ps2} isActive={status.active_source === 2} isOverloaded={false} />
         </div>
 
-        {/* Row 2: Relay panel (full width) */}
+        {/* Row 2: Load Distribution */}
+        <LoadDistribution ps1={status.ps1} ps2={status.ps2} activeSource={status.active_source} />
+
+        {/* Row 3: Relay panel (full width) */}
         <RelayPanel relays={status.relays} />
 
         {/* Row 3: Chart + Controls */}
