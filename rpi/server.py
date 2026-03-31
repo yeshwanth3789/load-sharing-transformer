@@ -16,7 +16,7 @@ GPIO map:
 
 PZEM:
     PS1 → /dev/ttyUSB0   slave addr 0x01
-    PS2 → /dev/ttyUSB1   slave addr 0x01  (not yet connected, detected automatically)
+    PS2 → /dev/ttyS0     slave addr 0x01  (hardware UART GPIO14/15 — wired, PZEM module arriving)
 """
 
 import time
@@ -28,7 +28,7 @@ from flask_cors import CORS
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PS1_PORT      = '/dev/ttyUSB0'
-PS2_PORT      = '/dev/ttyUSB1'
+PS2_PORT      = '/dev/ttyS0'    # hardware UART — GPIO 14 (TX) and 15 (RX)
 PZEM_ADDR     = 0x01
 PZEM_BAUD     = 9600
 PZEM_TIMEOUT  = 1.0
@@ -222,12 +222,14 @@ def api_status():
             'energy': None, 'frequency': None, 'pf': None, 'alarm': False,
         }
 
-    # Relay states (changeover)
+    # Relay states — changeover R1-R4 + cutoff R5-R6
     relays = {
-        'ps1_l': GPIO.input(RELAY_MAP['R1']) == CHANGEOVER_ON,
-        'ps1_n': GPIO.input(RELAY_MAP['R2']) == CHANGEOVER_ON,
-        'ps2_l': GPIO.input(RELAY_MAP['R3']) == CHANGEOVER_ON,
-        'ps2_n': GPIO.input(RELAY_MAP['R4']) == CHANGEOVER_ON,
+        'ps1_l':   GPIO.input(RELAY_MAP['R1']) == CHANGEOVER_ON,
+        'ps1_n':   GPIO.input(RELAY_MAP['R2']) == CHANGEOVER_ON,
+        'ps2_l':   GPIO.input(RELAY_MAP['R3']) == CHANGEOVER_ON,
+        'ps2_n':   GPIO.input(RELAY_MAP['R4']) == CHANGEOVER_ON,
+        'ps1_cut': state['ps1_cutoff'],   # R5 — PWR1 cutoff
+        'ps2_cut': state['ps2_cutoff'],   # R6 — PWR2 cutoff
     }
 
     return jsonify({
@@ -297,18 +299,30 @@ def api_cutoff():
 @app.route('/api/relay', methods=['POST'])
 def api_relay():
     """
-    Directly control a single changeover relay (R1-R4).
+    Directly control any relay R1-R6.
     Body: { "relay": "R1", "on": true | false }
-    Use with caution — prefer /api/switch for source switching.
+    R1-R4 = changeover (prefer /api/switch instead)
+    R5-R6 = cutoff     (prefer /api/cutoff instead)
     """
     body  = request.get_json(force=True)
     relay = body.get('relay')
     on    = body.get('on')
 
-    if relay not in ('R1', 'R2', 'R3', 'R4') or not isinstance(on, bool):
-        return jsonify({'error': 'relay (R1-R4) and on (bool) required'}), 400
+    if relay not in ('R1', 'R2', 'R3', 'R4', 'R5', 'R6') or not isinstance(on, bool):
+        return jsonify({'error': 'relay (R1-R6) and on (bool) required'}), 400
 
-    set_changeover(relay, on)
+    if relay in ('R1', 'R2', 'R3', 'R4'):
+        set_changeover(relay, on)
+    else:
+        # R5 / R6 cutoff relays
+        key = 'ps1_cutoff' if relay == 'R5' else 'ps2_cutoff'
+        if on:
+            cut_power(relay)
+            state[key] = True
+        else:
+            restore_power(relay)
+            state[key] = False
+
     return jsonify({'ok': True, 'relay': relay, 'on': on})
 
 

@@ -167,5 +167,5 @@ The UI must handle 3 cases per source:
 | false | "could not open port..." | "Sensor offline" |
 | false | any string | Show error string as tooltip/badge |
 
-PS2 will show sensor_connected=false until /dev/ttyUSB1 is plugged in.
-Once plugged in and server detects it, sensor_connected becomes true automatically — no server restart needed.
+PS2 will show sensor_connected=false until the PZEM module is physically connected to GPIO 14/15 (hardware UART /dev/ttyS0).
+Once connected, sensor_connected becomes true automatically — no server restart needed.
