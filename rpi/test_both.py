@@ -15,7 +15,7 @@ SLAVE_ADDR = 0x01
 BAUD       = 9600
 
 # ── Relay config ──────────────────────────────────────────────────────────────
-RELAY_MAP  = {'R1': 17, 'R2': 27, 'R3': 22, 'R4': 23}
+RELAY_MAP  = {'R1': 17, 'R2': 27, 'R3': 22, 'R4': 23, 'R5': 24, 'R6': 25}
 ACTIVE_LOW = True
 ON  = GPIO.LOW  if ACTIVE_LOW else GPIO.HIGH
 OFF = GPIO.HIGH if ACTIVE_LOW else GPIO.LOW

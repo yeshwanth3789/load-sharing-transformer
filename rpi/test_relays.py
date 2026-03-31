@@ -3,10 +3,12 @@
 Cycles through all 4 relays individually, then together.
 
 Wiring:
-    R1 → GPIO 17   (PWR1 L-wire)
-    R2 → GPIO 27   (PWR1 N-wire)
-    R3 → GPIO 22   (PWR2 L-wire)
-    R4 → GPIO 23   (PWR2 N-wire)
+    R1 → GPIO 17   (PWR1 L-wire changeover)
+    R2 → GPIO 27   (PWR1 N-wire changeover)
+    R3 → GPIO 22   (PWR2 L-wire changeover)
+    R4 → GPIO 23   (PWR2 N-wire changeover)
+    R5 → GPIO 24   (PWR1 cutoff — overload protection)
+    R6 → GPIO 25   (PWR2 cutoff — overload protection)
 
 Required package:
     pip install RPi.GPIO        (usually pre-installed on Raspberry Pi OS)
@@ -20,10 +22,12 @@ import RPi.GPIO as GPIO
 
 # ── Config ────────────────────────────────────────────────────────────────────
 RELAY_MAP = {
-    'R1': 17,   # PWR1 L
-    'R2': 27,   # PWR1 N
-    'R3': 22,   # PWR2 L
-    'R4': 23,   # PWR2 N
+    'R1': 17,   # PWR1 L changeover
+    'R2': 27,   # PWR1 N changeover
+    'R3': 22,   # PWR2 L changeover
+    'R4': 23,   # PWR2 N changeover
+    'R5': 24,   # PWR1 cutoff (overload)
+    'R6': 25,   # PWR2 cutoff (overload)
 }
 
 ACTIVE_LOW = True   # True for most opto-isolated relay boards
