@@ -10,9 +10,11 @@ import RPi.GPIO as GPIO
 R5 = 24
 R6 = 25
 
-ACTIVE_LOW = True
-ON  = GPIO.LOW  if ACTIVE_LOW else GPIO.HIGH
-OFF = GPIO.HIGH if ACTIVE_LOW else GPIO.LOW
+# These relays are ACTIVE HIGH — COM→power, NC→load, NO→nowhere
+# Energize (HIGH) = NC opens = load cut off
+# De-energize (LOW) = NC closed = power flows normally
+ON  = GPIO.HIGH   # energize = cut power
+OFF = GPIO.LOW    # de-energize = power flows
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
