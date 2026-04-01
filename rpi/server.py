@@ -213,6 +213,9 @@ def poll_pzem():
 
             if total_load > total_capacity:
                 print(f"[DTR] EMERGENCY! Combined {total_load:.0f}W > capacity {total_capacity}W — cutting BOTH")
+                # Turn off all changeover relays first (stops sockets and bulbs on both sides)
+                for r in ['R1', 'R2', 'R3', 'R4']:
+                    set_changeover(r, False)
                 cut_power('R5')
                 state['ps1_cutoff'] = True
                 cut_power('R6')

@@ -11,7 +11,7 @@ import ScenarioPanel from './ScenarioPanel'
 import CircuitDiagram from './CircuitDiagram'
 import LoadDistribution from './LoadDistribution'
 import LoadSharingPanel from './LoadSharingPanel'
-import { fetchStatus, sendSwitch, sendMode, sendCutoff, getMockStatus, getBaseUrl, setBaseUrl } from '@/lib/api'
+import { fetchStatus, sendSwitch, sendMode, sendCutoff, sendRelay, getMockStatus, getBaseUrl, setBaseUrl } from '@/lib/api'
 
 const POLL_INTERVAL = 3000
 const MAX_HISTORY = 40
@@ -20,9 +20,8 @@ function ts() {
   return new Date().toLocaleTimeString()
 }
 
-let alertCounter = 0
 function makeAlert(type, message) {
-  return { id: ++alertCounter, type, message, time: ts() }
+  return { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, type, message, time: ts() }
 }
 
 // ─── Scenario definitions (demo mode only) ─────────────────────────────────
@@ -168,6 +167,10 @@ export default function Dashboard() {
   const prevOverloadRef = useRef({ ps1: false, ps2: false })
   const prevDtrRef = useRef(false)
   const dtrCutoffRef = useRef(false)  // true = DTR auto-cutoff is active, suppress false 'cleared'
+  const ps1OverloadCutoffRef = useRef(false)  // true = PS1 overload cutoff pending/active — suppresses re-trigger
+  const ps1CutoffActiveRef = useRef(false)    // true = PS1 intentionally cut — suppresses sensor/cutoff alerts
+  const ps1OverloadTimerRef = useRef(null)    // holds the 2-second cutoff timeout
+  const [ps1OverloadPrompt, setPs1OverloadPrompt] = useState(null)  // { ps2Available } or null
 
   const addAlert = useCallback((type, message) => {
     setAlerts((prev) => [...prev.slice(-49), makeAlert(type, message)])
@@ -206,7 +209,10 @@ export default function Dashboard() {
             }
             // Detect cutoff events
             if (!prev.cutoff?.ps1 && data.cutoff?.ps1) {
-              addAlert('error', 'PS1 cutoff activated — overload protection triggered!')
+              // Suppress if we triggered this cutoff ourselves (overload auto-cut)
+              if (!ps1CutoffActiveRef.current) {
+                addAlert('error', 'PS1 cutoff activated — overload protection triggered!')
+              }
             }
             if (prev.cutoff?.ps1 && !data.cutoff?.ps1) {
               addAlert('success', 'PS1 cutoff restored — power line reconnected.')
@@ -219,7 +225,10 @@ export default function Dashboard() {
             }
             // Detect sensor connect/disconnect
             if (prev.ps1?.sensor_connected && !data.ps1?.sensor_connected) {
-              addAlert('warning', `PS1 sensor disconnected${data.ps1?.error ? ': ' + data.ps1.error : ''}`)
+              // Suppress if PS1 is intentionally cut (PZEM loses power when R5 opens)
+              if (!ps1CutoffActiveRef.current) {
+                addAlert('warning', `PS1 sensor disconnected${data.ps1?.error ? ': ' + data.ps1.error : ''}`)
+              }
             }
             if (!prev.ps1?.sensor_connected && data.ps1?.sensor_connected) {
               addAlert('success', 'PS1 sensor connected — readings available.')
@@ -263,16 +272,42 @@ export default function Dashboard() {
         const isPs1Over = p1 > ps1Threshold
         const isPs2Over = ps2Effective > ps2Threshold
 
-        if (isPs1Over && !wasPs1Over) {
-          const overflow = p1 - ps1Threshold
-          const ps2Headroom = Math.max(0, ps2Threshold - ps2Effective)
-          const shared = Math.min(overflow, ps2Headroom)
+        if (isPs1Over && !wasPs1Over && !ps1OverloadCutoffRef.current) {
+          const ps2Available = Math.max(0, ps2Threshold - p2)
           addAlert('warning',
-            `⚡ PS1 overloaded! ${p1.toFixed(0)}W exceeds ${ps1Threshold}W. Sharing ${shared.toFixed(0)}W to PS2 (effective: ${ps2Effective.toFixed(0)}W).`
+            `⚡ PS1 overloaded! ${p1.toFixed(0)}W exceeds ${ps1Threshold}W threshold. Cutting PS1 power in 2 seconds…`
           )
+          ps1OverloadCutoffRef.current = true
+          ps1OverloadTimerRef.current = setTimeout(() => {
+            ps1CutoffActiveRef.current = true  // mark PS1 as intentionally cut — suppress sensor/cutoff alerts
+            // Cut PS1: turn off changeover relays R1/R2, then cut R5
+            if (!demoMode) {
+              sendRelay('R1', false).catch(() => {})
+              sendRelay('R2', false).catch(() => {})
+              sendCutoff(1, true).catch(() => {})
+            } else {
+              setStatus((prev) => prev ? ({
+                ...prev,
+                relays: { ...prev.relays, ps1_l: false, ps1_n: false },
+                cutoff: { ...prev.cutoff, ps1: true },
+              }) : prev)
+            }
+            addAlert('error', '🔴 PS1 load exceeds threshold — socket and bulb stopped.')
+            setPs1OverloadPrompt({ ps2Available })
+          }, 2000)
         }
         if (!isPs1Over && wasPs1Over) {
-          addAlert('success', 'PS1 load back within threshold.')
+          // Only show "load back" if this wasn't caused by our own cutoff (power dropping to 0 after R5 cut)
+          if (!ps1OverloadCutoffRef.current) {
+            addAlert('success', 'PS1 load back within threshold.')
+          }
+          // Cancel pending cutoff only if load genuinely recovered before the 2s timer fired
+          if (ps1OverloadTimerRef.current) {
+            clearTimeout(ps1OverloadTimerRef.current)
+            ps1OverloadTimerRef.current = null
+            ps1OverloadCutoffRef.current = false
+            ps1CutoffActiveRef.current = false
+          }
         }
         if (isPs2Over && !wasPs2Over) {
           addAlert('warning',
@@ -301,6 +336,18 @@ export default function Dashboard() {
           dtrCutoffRef.current = true
           handleCutoff(1, true)   // cut PS1 (relay R5)
           handleCutoff(2, true)   // cut PS2 (relay R6)
+          // Stop all sockets and bulbs on both PS1 and PS2 (changeover relays R1-R4)
+          if (!demoMode) {
+            sendRelay('R1', false).catch(() => {})
+            sendRelay('R2', false).catch(() => {})
+            sendRelay('R3', false).catch(() => {})
+            sendRelay('R4', false).catch(() => {})
+          } else {
+            setStatus((prev) => ({
+              ...prev,
+              relays: { ...prev.relays, ps1_l: false, ps1_n: false, ps2_l: false, ps2_n: false },
+            }))
+          }
         }
 
         // Only show 'DTR cleared' if it was NOT an auto-cutoff (user manually restored)
@@ -316,7 +363,7 @@ export default function Dashboard() {
 
     poll()
     const id = setInterval(poll, POLL_INTERVAL)
-    return () => { mounted = false; clearInterval(id) }
+    return () => { mounted = false; clearInterval(id); clearTimeout(ps1OverloadTimerRef.current) }
   }, [demoMode, rpiUrl, ps1Threshold, ps2Threshold, addAlert])
 
   // ─── Scenario trigger (demo only) ──────────────────────────────────────────
@@ -363,6 +410,30 @@ export default function Dashboard() {
     }
   }
 
+  async function handlePs1OverloadOkay() {
+    setPs1OverloadPrompt(null)
+    // Do NOT reset ps1OverloadCutoffRef here — keeping it true prevents the poll loop from
+    // re-detecting the (now 0W) PS1 as "recovered" and then re-arming, which would let a
+    // stale reading trigger the 2-second cut timer again and turn the relay off.
+    // It will be cleared when the operator explicitly restores PS1 via handleCutoff(1, false).
+    try {
+      if (!demoMode) {
+        // Energize R1+R2 (NO path: PS2 feeds PS1 load side) — switch_to_source(2) handles this
+        await sendSwitch(2)
+      } else {
+        // Switch to PS2: R1/R2 energize (NO path) so PS2 feeds PS1's socket+bulb
+        setStatus((prev) => prev ? ({
+          ...prev,
+          active_source: 2,
+          relays: { ...prev.relays, ps1_l: true, ps1_n: true, ps2_l: false, ps2_n: false },
+        }) : prev)
+      }
+      addAlert('info', '⚡ Load sharing from PS2 — socket and bulb now powered from Both ps1 and PS2.')
+    } catch {
+      addAlert('error', 'Failed to switch to PS2.')
+    }
+  }
+
   async function handleCutoff(source, cut) {
     try {
       if (!demoMode) {
@@ -379,6 +450,13 @@ export default function Dashboard() {
             [source === 1 ? 'ps1' : 'ps2']: cut,
           },
         }))
+      }
+
+      // If user is restoring PS1, clear the overload cutoff locks so detection re-arms
+      if (!cut && source === 1 && ps1OverloadCutoffRef.current) {
+        ps1OverloadCutoffRef.current = false
+        ps1CutoffActiveRef.current = false
+        setPs1OverloadPrompt(null)
       }
 
       // If user is restoring power, clear the DTR auto-cutoff lock
@@ -438,6 +516,28 @@ export default function Dashboard() {
             isCutoff={status.cutoff?.ps2}
           />
         </div>
+
+        {/* PS1 Overload — OK to transfer load to PS2 */}
+        {ps1OverloadPrompt && (
+          <div className="border border-orange-500 bg-orange-950/50 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="text-2xl leading-none">⚡</span>
+              <div>
+                <p className="text-orange-400 font-bold text-sm">PS1 Overload — now power from both ps1 and ps2</p>
+                <p className="text-zinc-300 text-sm mt-0.5">PS1 socket and bulb are stopped.</p>
+                <p className="text-green-400 text-sm font-medium mt-1">
+                  PS2 has <span className="font-bold text-green-300">{ps1OverloadPrompt.ps2Available.toFixed(0)}W</span> available — ready to take the load.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={handlePs1OverloadOkay}
+              className="bg-green-600 hover:bg-green-500 active:bg-green-700 text-white font-bold px-6 py-2.5 rounded-lg text-sm transition-colors shrink-0"
+            >
+              OK — Switch to PS2
+            </button>
+          </div>
+        )}
 
         {/* Row 2: Load Sharing (automatic mode) */}
         <LoadSharingPanel

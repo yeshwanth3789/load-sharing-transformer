@@ -224,14 +224,17 @@ export default function CircuitDiagram({
   const dim = '#27272a'                      // inactive wire
 
   // Active path logic — which relay terminal is live
-  const ncR1 = (!r1on && ps1) ? c1 : dim    // R1 NC ← PWR1-L
-  const ncR2 = (!r2on && ps1) ? c1 : dim    // R2 NC ← PWR1-N
-  const ncR3 = (!r3on && ps2) ? c2 : dim    // R3 NC ← PWR2-L
-  const ncR4 = (!r4on && ps2) ? c2 : dim    // R4 NC ← PWR2-N
-  const noR1 = (r1on  && ps2) ? c2 : dim    // R1 NO ← PWR2-L
-  const noR2 = (r2on  && ps2) ? c2 : dim    // R2 NO ← PWR2-N
-  const noR3 = (r3on  && ps1) ? c1 : dim    // R3 NO ← PWR1-L
-  const noR4 = (r4on  && ps1) ? c1 : dim    // R4 NO ← PWR1-N
+  // Must check cutoff: if R5/R6 is cut, that source cannot feed any load
+  const ps1Live = ps1 && !r5cut
+  const ps2Live = ps2 && !r6cut
+  const ncR1 = (!r1on && ps1Live) ? c1 : dim    // R1 NC ← PWR1-L
+  const ncR2 = (!r2on && ps1Live) ? c1 : dim    // R2 NC ← PWR1-N
+  const ncR3 = (!r3on && ps2Live) ? c2 : dim    // R3 NC ← PWR2-L
+  const ncR4 = (!r4on && ps2Live) ? c2 : dim    // R4 NC ← PWR2-N
+  const noR1 = (r1on  && ps2Live) ? c2 : dim    // R1 NO ← PWR2-L
+  const noR2 = (r2on  && ps2Live) ? c2 : dim    // R2 NO ← PWR2-N
+  const noR3 = (r3on  && ps1Live) ? c1 : dim    // R3 NO ← PWR1-L
+  const noR4 = (r4on  && ps1Live) ? c1 : dim    // R4 NO ← PWR1-N
 
   const comR1 = (ncR1 !== dim || noR1 !== dim) ? '#3b82f6' : dim
   const comR2 = (ncR2 !== dim || noR2 !== dim) ? '#3b82f6' : dim
