@@ -20,6 +20,12 @@ const scenarios = [
     color: 'amber',
   },
   {
+    id: 'overload_cutoff',
+    label: 'Overload Cutoff (R5)',
+    desc: 'PS1 exceeds 4000W — R5 cuts power line',
+    color: 'red',
+  },
+  {
     id: 'manual_switch',
     label: 'Manual Switch to PS2',
     desc: 'Operator forces switch to PS2',
@@ -30,6 +36,18 @@ const scenarios = [
     label: 'PS1 Restored',
     desc: 'PS1 comes back online, system re-evaluates',
     color: 'green',
+  },
+  {
+    id: 'load_sharing',
+    label: 'Load Sharing Test',
+    desc: 'PS1 at 3200W exceeds threshold — overflow goes to PS2',
+    color: 'amber',
+  },
+  {
+    id: 'deploy_dtr',
+    label: '🚨 Deploy DTR Emergency',
+    desc: 'Both sources overloaded — combined load exceeds total capacity',
+    color: 'red',
   },
 ]
 

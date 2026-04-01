@@ -45,25 +45,28 @@ export default function LiveChart({ history, label, unit, color = '#3b82f6', min
         </span>
       </div>
 
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="none" style={{ height: '80px' }}>
-        {/* Area fill */}
-        <defs>
-          <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.25" />
-            <stop offset="100%" stopColor={color} stopOpacity="0.02" />
-          </linearGradient>
-        </defs>
-        <path d={areaPath} fill="url(#chartGrad)" />
-        {/* Line */}
-        <polyline points={polyline} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-        {/* Latest dot */}
-        <circle
-          cx={W - pad}
-          cy={H - pad - ((latest - lo) / range) * (H - pad * 2)}
-          r="3"
-          fill={color}
-        />
-      </svg>
+      {(() => {
+        // Unique gradient ID per chart to avoid SVG ID collisions
+        const gradId = `chartGrad-${label.replace(/\s+/g, '-').toLowerCase()}`
+        return (
+          <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="none" style={{ height: '80px' }}>
+            <defs>
+              <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={color} stopOpacity="0.25" />
+                <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+              </linearGradient>
+            </defs>
+            <path d={areaPath} fill={`url(#${gradId})`} />
+            <polyline points={polyline} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+            <circle
+              cx={W - pad}
+              cy={H - pad - ((latest - lo) / range) * (H - pad * 2)}
+              r="3"
+              fill={color}
+            />
+          </svg>
+        )
+      })()}
 
       <div className="flex justify-between text-xs text-zinc-600">
         <span>{history[0]?.time}</span>

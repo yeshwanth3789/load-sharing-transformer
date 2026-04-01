@@ -20,7 +20,6 @@ function RadialGauge({ percentage, power, color, size = 120 }) {
 
   return (
     <svg width={size} height={size} className="drop-shadow-lg">
-      {/* Background glow */}
       <defs>
         <filter id={`glow-${color.ring.replace('#', '')}`}>
           <feGaussianBlur stdDeviation="3" result="glow" />
@@ -80,13 +79,16 @@ function StatRow({ icon, label, value, unit, warn }) {
   )
 }
 
-function SourceLoadCard({ id, data, isActive, accentColor }) {
+function SourceLoadCard({ id, data, isActive, isCutoff, accentColor }) {
   const noSensor = !data.sensor_connected
+  const hasError = noSensor && data.error
   const power = data.power ?? 0
   const current = data.current ?? 0
   const loadPct = data.power != null ? Math.min(100, (power / MAX_LOAD_W) * 100) : 0
   const currentPct = data.current != null ? Math.min(100, (current / MAX_CURRENT_A) * 100) : 0
-  const color = getLoadColor(loadPct)
+  const color = isCutoff
+    ? { ring: '#ef4444', bg: '#ef444420', text: 'text-red-400', label: 'CUT OFF' }
+    : getLoadColor(loadPct)
 
   return (
     <div className={`rounded-xl border ${isActive ? 'border-zinc-700' : 'border-zinc-800/60'} bg-zinc-900/80 backdrop-blur p-5 flex flex-col gap-4 transition-all duration-500`}>
@@ -99,12 +101,14 @@ function SourceLoadCard({ id, data, isActive, accentColor }) {
           </div>
           <div>
             <h3 className="text-white text-sm font-semibold">Power Source {id}</h3>
-            <span className={`text-xs ${isActive ? 'text-emerald-400' : 'text-zinc-600'}`}>
-              {isActive ? '● Supplying Load' : '○ Standby'}
+            <span className={`text-xs ${
+              isCutoff ? 'text-red-400' : isActive ? 'text-emerald-400' : 'text-zinc-600'
+            }`}>
+              {isCutoff ? '⚡ Cut Off' : isActive ? '● Supplying Load' : '○ Standby'}
             </span>
           </div>
         </div>
-        {!noSensor && (
+        {(!noSensor || isCutoff) && (
           <div className={`px-2.5 py-1 rounded-full text-xs font-semibold ${color.text}`}
             style={{ backgroundColor: color.bg }}>
             {color.label}
@@ -114,17 +118,31 @@ function SourceLoadCard({ id, data, isActive, accentColor }) {
 
       {noSensor ? (
         <div className="flex flex-col items-center justify-center py-6 gap-2">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-zinc-700">
-            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-          </svg>
-          <p className="text-zinc-600 text-sm">No sensor connected</p>
-          <p className="text-zinc-700 text-xs">Load data unavailable</p>
+          {hasError ? (
+            <>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-orange-500">
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <p className="text-orange-400 text-sm font-semibold">Sensor Offline</p>
+              <p className="text-zinc-600 text-xs text-center max-w-[200px]" title={data.error}>{data.error}</p>
+            </>
+          ) : (
+            <>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-zinc-700">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+              </svg>
+              <p className="text-zinc-600 text-sm">No sensor connected</p>
+              <p className="text-zinc-700 text-xs">Load data unavailable</p>
+            </>
+          )}
         </div>
       ) : (
         <>
           {/* Gauge */}
           <div className="flex justify-center">
-            <RadialGauge percentage={loadPct} power={data.power} color={color} />
+            <RadialGauge percentage={isCutoff ? 0 : loadPct} power={isCutoff ? 0 : data.power} color={color} />
           </div>
 
           {/* Current draw bar */}
@@ -137,7 +155,7 @@ function SourceLoadCard({ id, data, isActive, accentColor }) {
               <div
                 className="h-full rounded-full transition-all duration-700"
                 style={{
-                  width: `${currentPct}%`,
+                  width: `${isCutoff ? 0 : currentPct}%`,
                   background: `linear-gradient(90deg, ${color.ring}88, ${color.ring})`,
                 }}
               />
@@ -151,7 +169,7 @@ function SourceLoadCard({ id, data, isActive, accentColor }) {
             <StatRow icon="🔌" label="Current" value={data.current?.toFixed(2)} unit="A"
               warn={data.current > 18} />
             <StatRow icon="📊" label="Power Factor" value={data.pf?.toFixed(2)} unit="" />
-            <StatRow icon="🔋" label="Energy Used" value={data.energy?.toFixed(2)} unit="kWh" />
+            <StatRow icon="🔋" label="Energy Used" value={data.energy?.toFixed(0)} unit="Wh" />
           </div>
         </>
       )}
@@ -228,7 +246,7 @@ function TotalLoadBar({ ps1Power, ps2Power }) {
   )
 }
 
-export default function LoadDistribution({ ps1, ps2, activeSource }) {
+export default function LoadDistribution({ ps1, ps2, activeSource, cutoff }) {
   return (
     <div className="flex flex-col gap-4">
       {/* Section title */}
@@ -245,8 +263,10 @@ export default function LoadDistribution({ ps1, ps2, activeSource }) {
 
       {/* Per-source cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <SourceLoadCard id={1} data={ps1} isActive={activeSource === 1} accentColor="#3b82f6" />
-        <SourceLoadCard id={2} data={ps2} isActive={activeSource === 2} accentColor="#8b5cf6" />
+        <SourceLoadCard id={1} data={ps1} isActive={activeSource === 1}
+          isCutoff={cutoff?.ps1} accentColor="#3b82f6" />
+        <SourceLoadCard id={2} data={ps2} isActive={activeSource === 2}
+          isCutoff={cutoff?.ps2} accentColor="#8b5cf6" />
       </div>
     </div>
   )

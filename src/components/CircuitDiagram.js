@@ -179,21 +179,48 @@ function Buzzer({ x, y }) {
   )
 }
 
+/* Cutoff relay — inline on the power rail, shows break when cut */
+function CutoffRelay({ x, y, label, gpioLabel, isCut, railColor }) {
+  const bg = isCut ? '#450a0a' : '#18181b'
+  const bd = isCut ? '#ef4444' : '#3f3f46'
+  const tc = isCut ? '#fca5a5' : '#71717a'
+  return (
+    <g>
+      <rect x={x - 22} y={y - 14} width={44} height={28} rx={4}
+        fill={bg} stroke={bd} strokeWidth={isCut ? 2 : 1.5} />
+      {isCut ? (
+        <>
+          <line x1={x - 10} y1={y - 6} x2={x + 10} y2={y + 6} stroke="#ef4444" strokeWidth={2} strokeLinecap="round" />
+          <line x1={x - 10} y1={y + 6} x2={x + 10} y2={y - 6} stroke="#ef4444" strokeWidth={2} strokeLinecap="round" />
+        </>
+      ) : (
+        <line x1={x - 12} y1={y} x2={x + 12} y2={y} stroke="#34d399" strokeWidth={2} />
+      )}
+      <Lbl x={x} y={y - 19} txt={label} color={tc} size={10} bold />
+      <Lbl x={x} y={y + 24} txt={gpioLabel} color="#52525b" size={8} />
+      {isCut && <Lbl x={x} y={y - 28} txt="CUT" color="#ef4444" size={8} bold />}
+    </g>
+  )
+}
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 export default function CircuitDiagram({
-  relays = { ps1_l: false, ps1_n: false, ps2_l: false, ps2_n: false },
+  relays = { ps1_l: false, ps1_n: false, ps2_l: false, ps2_n: false, ps1_cut: false, ps2_cut: false },
   activeSource = 1,
+  cutoff = { ps1: false, ps2: false },
 }) {
   const r1on = relays.ps1_l   // R1 = PS1 Live relay
   const r2on = relays.ps1_n   // R2 = PS1 Neutral relay
   const r3on = relays.ps2_l   // R3 = PS2 Live relay
   const r4on = relays.ps2_n   // R4 = PS2 Neutral relay
+  const r5cut = cutoff.ps1 || relays.ps1_cut  // R5 = PWR1 cutoff
+  const r6cut = cutoff.ps2 || relays.ps2_cut  // R6 = PWR2 cutoff
 
   const ps1 = activeSource === 1
   const ps2 = activeSource === 2
 
-  const c1  = ps1 ? '#22c55e' : '#3f3f46'   // PS1 color
-  const c2  = ps2 ? '#a855f7' : '#3f3f46'   // PS2 color
+  const c1  = (ps1 && !r5cut) ? '#22c55e' : '#3f3f46'   // PS1 color (dim if cut)
+  const c2  = (ps2 && !r6cut) ? '#a855f7' : '#3f3f46'   // PS2 color (dim if cut)
   const dim = '#27272a'                      // inactive wire
 
   // Active path logic — which relay terminal is live
@@ -304,12 +331,14 @@ export default function CircuitDiagram({
         <Lbl x={60} y={pw2N + 4} txt="PWR2-N" color={c2} size={9} anchor="end" />
 
         {/* ═══ PWR1-L RAIL (y=100) ═════════════════════════════════════════
-            PS1 → SW1 → PZEM → runs right to R1-NC(278) and continues to R3-NO(602) */}
-        <Wire x1={120} y1={pw1L} x2={153} y2={pw1L} color={c1} />
-        <Sw x={170} y={pw1L} label="SW1" color={c1} />
-        <Wire x1={184} y1={pw1L} x2={212} y2={pw1L} color={c1} />
-        <Pzem x={230} y={pw1L} color={c1} />
-        <Wire x1={248} y1={pw1L} x2={R1x + 18} y2={pw1L} color={c1} />
+            PS1 → R5(cutoff) → SW1 → PZEM → R1-NC(278) → R3-NO(602) */}
+        <Wire x1={120} y1={pw1L} x2={128} y2={pw1L} color={r5cut ? '#ef4444' : c1} />
+        <CutoffRelay x={150} y={pw1L} label="R5" gpioLabel="GPIO 24" isCut={r5cut} railColor={c1} />
+        <Wire x1={172} y1={pw1L} x2={183} y2={pw1L} color={c1} />
+        <Sw x={200} y={pw1L} label="SW1" color={c1} />
+        <Wire x1={214} y1={pw1L} x2={232} y2={pw1L} color={c1} />
+        <Pzem x={250} y={pw1L} color={c1} />
+        <Wire x1={268} y1={pw1L} x2={R1x + 18} y2={pw1L} color={c1} />
         <Dot x={R1x + 18} y={pw1L} color={c1} />
         {/* Continue PWR1-L across to R3-NO at x=602 */}
         <Wire x1={R1x + 18} y1={pw1L} x2={R3x - 18} y2={pw1L} color={c1} />
@@ -323,10 +352,12 @@ export default function CircuitDiagram({
         <Dot x={R4x - 18} y={pw1N} color={c1} />
 
         {/* ═══ PWR2-L RAIL (y=170) ═════════════════════════════════════════
-            PS2 → SW2 → runs left to R3-NC(638) and continues to R1-NO(242) */}
-        <Wire x1={880} y1={pw2L} x2={848} y2={pw2L} color={c2} />
-        <Sw x={831} y={pw2L} label="SW2" color={c2} />
-        <Wire x1={817} y1={pw2L} x2={R3x + 18} y2={pw2L} color={c2} />
+            PS2 → R6(cutoff) → SW2 → runs left to R3-NC(638) → R1-NO(242) */}
+        <Wire x1={880} y1={pw2L} x2={872} y2={pw2L} color={r6cut ? '#ef4444' : c2} />
+        <CutoffRelay x={850} y={pw2L} label="R6" gpioLabel="GPIO 25" isCut={r6cut} railColor={c2} />
+        <Wire x1={828} y1={pw2L} x2={818} y2={pw2L} color={c2} />
+        <Sw x={801} y={pw2L} label="SW2" color={c2} />
+        <Wire x1={787} y1={pw2L} x2={R3x + 18} y2={pw2L} color={c2} />
         <Dot x={R3x + 18} y={pw2L} color={c2} />
         <Wire x1={R3x + 18} y1={pw2L} x2={R1x - 18} y2={pw2L} color={c2} />
         <Dot x={R1x - 18} y={pw2L} color={c2} />
@@ -397,8 +428,9 @@ export default function CircuitDiagram({
         <Relay x={R4x} y={RY} label="R4" energized={r4on} />
 
         {/* ═══ GPIO BUS (y=325) — runs BELOW relays, no overlap ═══════════
-            Each relay coil taps at (rx, RY+28) → drops to gpio bus at y=325 */}
-        {/* Coil wires from relays to GPIO bus */}
+            Each relay coil taps at (rx, RY+28) → drops to gpio bus at y=325
+            R5/R6 cutoff coils also connect via vertical drops from their rail positions */}
+        {/* Coil wires from changeover relays to GPIO bus */}
         <Wire x1={R1x} y1={RY + 28} x2={R1x} y2={gpioY} color="#f97316" dash />
         <Dot x={R1x} y={gpioY} color="#f97316" />
         <Wire x1={R2x} y1={RY + 28} x2={R2x} y2={gpioY} color="#f97316" dash />
@@ -407,9 +439,23 @@ export default function CircuitDiagram({
         <Dot x={R3x} y={gpioY} color="#f97316" />
         <Wire x1={R4x} y1={RY + 28} x2={R4x} y2={gpioY} color="#f97316" dash />
         <Dot x={R4x} y={gpioY} color="#f97316" />
-        {/* Horizontal GPIO bus */}
-        <Wire x1={R1x} y1={gpioY} x2={R4x} y2={gpioY} color="#f97316" dash />
-        <Lbl x={500} y={gpioY - 8} txt="GPIO Control Bus" color="#f97316" size={9} />
+        {/* R5 coil wire: from R5 (x=150, y=100+14) down to GPIO bus, bridging pw1N, pw2L, pw2N */}
+        <Wire x1={150} y1={pw1L + 14} x2={150} y2={pw1N - 8} color="#f97316" dash />
+        <Bridge x={150} y={pw1N} color="#f97316" />
+        <Wire x1={150} y1={pw1N + 8} x2={150} y2={pw2L - 8} color="#f97316" dash />
+        <Bridge x={150} y={pw2L} color="#f97316" />
+        <Wire x1={150} y1={pw2L + 8} x2={150} y2={pw2N - 8} color="#f97316" dash />
+        <Bridge x={150} y={pw2N} color="#f97316" />
+        <Wire x1={150} y1={pw2N + 8} x2={150} y2={gpioY} color="#f97316" dash />
+        <Dot x={150} y={gpioY} color="#f97316" />
+        {/* R6 coil wire: from R6 (x=850, y=170+14) down to GPIO bus, bridging pw2N */}
+        <Wire x1={850} y1={pw2L + 14} x2={850} y2={pw2N - 8} color="#f97316" dash />
+        <Bridge x={850} y={pw2N} color="#f97316" />
+        <Wire x1={850} y1={pw2N + 8} x2={850} y2={gpioY} color="#f97316" dash />
+        <Dot x={850} y={gpioY} color="#f97316" />
+        {/* Horizontal GPIO bus — extended to include R5 and R6 */}
+        <Wire x1={150} y1={gpioY} x2={850} y2={gpioY} color="#f97316" dash />
+        <Lbl x={500} y={gpioY - 8} txt="GPIO Control Bus (R1–R6)" color="#f97316" size={9} />
 
         {/* RPi vertical drop from GPIO bus centre */}
         <Wire x1={500} y1={gpioY} x2={500} y2={348} color="#f97316" dash />
@@ -505,7 +551,7 @@ export default function CircuitDiagram({
         <Wire x1={170} y1={615} x2={170} y2={629} color="#facc15" dash />
 
         {/* ═══ LEGEND ═════════════════════════════════════════════════════ */}
-        <rect x={640} y={596} width={340} height={78} rx={5} fill="#18181b" stroke="#3f3f46" strokeWidth={1} />
+        <rect x={640} y={596} width={340} height={90} rx={5} fill="#18181b" stroke="#3f3f46" strokeWidth={1} />
         <Lbl x={810} y={610} txt="LEGEND" color="#52525b" size={9} bold />
 
         <line x1={652} y1={622} x2={672} y2={622} stroke="#22c55e" strokeWidth={2} />
@@ -514,22 +560,25 @@ export default function CircuitDiagram({
         <line x1={652} y1={636} x2={672} y2={636} stroke="#a855f7" strokeWidth={2} />
         <Lbl x={680} y={639} txt="PS2 supply (PWR2)" color="#71717a" size={9} anchor="start" />
 
+        <line x1={652} y1={650} x2={672} y2={650} stroke="#f97316" strokeWidth={2} strokeDasharray="5,4" />
+        <Lbl x={680} y={653} txt="GPIO / control" color="#71717a" size={9} anchor="start" />
+
         <line x1={832} y1={622} x2={852} y2={622} stroke="#3b82f6" strokeWidth={2} />
         <Lbl x={860} y={625} txt="PWR1 load out" color="#71717a" size={9} anchor="start" />
 
         <line x1={832} y1={636} x2={852} y2={636} stroke="#8b5cf6" strokeWidth={2} />
         <Lbl x={860} y={639} txt="PWR2 load out" color="#71717a" size={9} anchor="start" />
 
-        <line x1={652} y1={652} x2={672} y2={652} stroke="#f97316" strokeWidth={2} strokeDasharray="5,4" />
-        <Lbl x={680} y={655} txt="GPIO / control" color="#71717a" size={9} anchor="start" />
+        <line x1={832} y1={650} x2={852} y2={650} stroke="#ef4444" strokeWidth={2} />
+        <Lbl x={860} y={653} txt="Cutoff (R5/R6)" color="#71717a" size={9} anchor="start" />
 
         {/* Bridge example in legend */}
-        <g transform="translate(832, 652)">
+        <g transform="translate(652, 664)">
           <line x1={0} y1={0} x2={4} y2={0} stroke="#71717a" strokeWidth={2} />
           <path d="M4,0 a4,4 0 0,0 8,0" fill="none" stroke="#71717a" strokeWidth={2} />
           <line x1={12} y1={0} x2={20} y2={0} stroke="#71717a" strokeWidth={2} />
         </g>
-        <Lbl x={860} y={655} txt="Wire bridge (no join)" color="#71717a" size={9} anchor="start" />
+        <Lbl x={680} y={667} txt="Wire bridge (no join)" color="#71717a" size={9} anchor="start" />
 
       </svg>
     </div>

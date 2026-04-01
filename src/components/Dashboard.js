@@ -10,7 +10,8 @@ import LiveChart from './LiveChart'
 import ScenarioPanel from './ScenarioPanel'
 import CircuitDiagram from './CircuitDiagram'
 import LoadDistribution from './LoadDistribution'
-import { fetchStatus, sendSwitch, sendMode, getMockStatus } from '@/lib/api'
+import LoadSharingPanel from './LoadSharingPanel'
+import { fetchStatus, sendSwitch, sendMode, sendCutoff, getMockStatus, getBaseUrl, setBaseUrl } from '@/lib/api'
 
 const POLL_INTERVAL = 3000
 const MAX_HISTORY = 40
@@ -24,7 +25,7 @@ function makeAlert(type, message) {
   return { id: ++alertCounter, type, message, time: ts() }
 }
 
-// ─── Scenario definitions ─────────────────────────────────────────────────────
+// ─── Scenario definitions (demo mode only) ─────────────────────────────────
 function applyScenario(id, base) {
   switch (id) {
     case 'normal':
@@ -33,24 +34,34 @@ function applyScenario(id, base) {
     case 'ps1_fault':
       return {
         ...base,
-        ps1: { ...base.ps1, voltage: 0, current: 0, power: 0, frequency: 0, pf: 0, energy: base.ps1.energy },
+        ps1: { ...base.ps1, voltage: 0, current: 0, power: 0, frequency: 0, pf: 0, energy: base.ps1.energy, alarm: false },
         ps2: {
+          sensor_connected: true,
+          error: null,
           voltage: parseFloat((226 + Math.random() * 5).toFixed(1)),
           current: parseFloat((8 + Math.random() * 4).toFixed(2)),
           power: parseFloat((226 * 10 * 0.96).toFixed(1)),
-          energy: parseFloat((12.4 + Math.random() * 0.1).toFixed(2)),
+          energy: parseFloat((1240 + Math.random() * 10).toFixed(0)),
           frequency: parseFloat((49.8 + Math.random() * 0.3).toFixed(1)),
           pf: parseFloat((0.94 + Math.random() * 0.04).toFixed(2)),
-          sensor_connected: true,
+          alarm: false,
         },
         active_source: 2,
-        relays: { ps1_l: false, ps1_n: false, ps2_l: true, ps2_n: true },
+        relays: { ...base.relays, ps1_l: false, ps1_n: false, ps2_l: true, ps2_n: true },
       }
 
     case 'high_load':
       return {
         ...base,
-        ps1: { ...base.ps1, current: 19.8, power: 4550 },
+        ps1: { ...base.ps1, current: 19.8, power: 4550, alarm: true },
+      }
+
+    case 'overload_cutoff':
+      return {
+        ...base,
+        ps1: { ...base.ps1, current: 0, power: 0, alarm: true },
+        relays: { ...base.relays, ps1_cut: true },
+        cutoff: { ...base.cutoff, ps1: true },
       }
 
     case 'manual_switch':
@@ -58,15 +69,17 @@ function applyScenario(id, base) {
         ...base,
         active_source: 2,
         mode: 'manual',
-        relays: { ps1_l: false, ps1_n: false, ps2_l: true, ps2_n: true },
+        relays: { ...base.relays, ps1_l: false, ps1_n: false, ps2_l: true, ps2_n: true },
         ps2: {
+          sensor_connected: true,
+          error: null,
           voltage: parseFloat((230 + Math.random() * 4).toFixed(1)),
           current: parseFloat((7 + Math.random() * 3).toFixed(2)),
           power: parseFloat((230 * 8.5 * 0.95).toFixed(1)),
-          energy: parseFloat((8.7 + Math.random() * 0.1).toFixed(2)),
+          energy: parseFloat((870 + Math.random() * 10).toFixed(0)),
           frequency: parseFloat((50.0 + Math.random() * 0.2).toFixed(1)),
           pf: parseFloat((0.93 + Math.random() * 0.05).toFixed(2)),
-          sensor_connected: true,
+          alarm: false,
         },
       }
 
@@ -74,7 +87,45 @@ function applyScenario(id, base) {
       return {
         ...base,
         active_source: 1,
-        relays: { ps1_l: true, ps1_n: true, ps2_l: false, ps2_n: false },
+        relays: { ...base.relays, ps1_l: true, ps1_n: true, ps2_l: false, ps2_n: false },
+      }
+
+    case 'load_sharing':
+      return {
+        ...base,
+        ps1: { ...base.ps1, current: 14.2, power: 3200, alarm: false },
+        ps2: {
+          sensor_connected: true,
+          error: null,
+          voltage: parseFloat((229 + Math.random() * 4).toFixed(1)),
+          current: parseFloat((3 + Math.random() * 2).toFixed(2)),
+          power: parseFloat((700 + Math.random() * 100).toFixed(1)),
+          energy: parseFloat((310 + Math.random() * 10).toFixed(0)),
+          frequency: parseFloat((50.0 + Math.random() * 0.2).toFixed(1)),
+          pf: parseFloat((0.94 + Math.random() * 0.04).toFixed(2)),
+          alarm: false,
+        },
+        active_source: 1,
+        relays: { ...base.relays, ps1_l: true, ps1_n: true, ps2_l: true, ps2_n: true },
+      }
+
+    case 'deploy_dtr':
+      return {
+        ...base,
+        ps1: { ...base.ps1, current: 15.5, power: 3500, alarm: true },
+        ps2: {
+          sensor_connected: true,
+          error: null,
+          voltage: parseFloat((228 + Math.random() * 4).toFixed(1)),
+          current: parseFloat((12.2 + Math.random() * 1).toFixed(2)),
+          power: parseFloat((2800 + Math.random() * 50).toFixed(1)),
+          energy: parseFloat((2100 + Math.random() * 10).toFixed(0)),
+          frequency: parseFloat((49.8 + Math.random() * 0.3).toFixed(1)),
+          pf: parseFloat((0.95 + Math.random() * 0.03).toFixed(2)),
+          alarm: true,
+        },
+        active_source: 1,
+        relays: { ...base.relays, ps1_l: true, ps1_n: true, ps2_l: true, ps2_n: true },
       }
 
     default:
@@ -83,28 +134,52 @@ function applyScenario(id, base) {
 }
 
 const SCENARIO_ALERTS = {
-  normal:        { type: 'success', message: 'Normal operation — PS1 is active and stable.' },
-  ps1_fault:     { type: 'error',   message: 'PS1 fault detected! Auto-switched to PS2.' },
-  high_load:     { type: 'warning', message: 'High load warning — current nearing overload threshold on PS1.' },
-  manual_switch: { type: 'info',    message: 'Operator manually switched load to PS2.' },
-  ps1_restore:   { type: 'success', message: 'PS1 restored — load switched back from PS2.' },
+  normal:          { type: 'success', message: 'Normal operation — PS1 is active and stable.' },
+  ps1_fault:       { type: 'error',   message: 'PS1 fault detected! Auto-switched to PS2.' },
+  high_load:       { type: 'warning', message: 'High load warning — current nearing overload threshold on PS1.' },
+  overload_cutoff: { type: 'error',   message: 'Overload! PS1 cutoff relay R5 activated — power disconnected.' },
+  manual_switch:   { type: 'info',    message: 'Operator manually switched load to PS2.' },
+  ps1_restore:     { type: 'success', message: 'PS1 restored — load switched back from PS2.' },
+  load_sharing:    { type: 'warning', message: 'PS1 at 3200W — exceeds threshold! Overflow shared to PS2.' },
+  deploy_dtr:      { type: 'error',   message: '🚨 DEPLOY DTR! Combined load exceeds total capacity. Emergency transformer required!' },
 }
 
 export default function Dashboard() {
   const [status, setStatus] = useState(null)
   const [alerts, setAlerts] = useState([])
-  const [history, setHistory] = useState([])   // voltage history for chart
+  // Voltage history
+  const [ps1VHistory, setPs1VHistory] = useState([])
+  const [ps2VHistory, setPs2VHistory] = useState([])
+  // Load (power) history
+  const [ps1PHistory, setPs1PHistory] = useState([])
+  const [ps2PHistory, setPs2PHistory] = useState([])
+
   const [flaskConnected, setFlaskConnected] = useState(false)
   const [demoMode, setDemoMode] = useState(true)
   const [activeScenario, setActiveScenario] = useState('normal')
   const [switching, setSwitching] = useState(false)
+  const [rpiUrl, setRpiUrl] = useState(getBaseUrl())
 
-  const prevActiveRef = useRef(null)
+  // Load sharing thresholds (user-configurable)
+  const [ps1Threshold, setPs1Threshold] = useState(2500)
+  const [ps2Threshold, setPs2Threshold] = useState(2500)
+
   const scenarioRef = useRef('normal')
+  const prevOverloadRef = useRef({ ps1: false, ps2: false })
+  const prevDtrRef = useRef(false)
+  const dtrCutoffRef = useRef(false)  // true = DTR auto-cutoff is active, suppress false 'cleared'
 
   const addAlert = useCallback((type, message) => {
     setAlerts((prev) => [...prev.slice(-49), makeAlert(type, message)])
   }, [])
+
+  // ─── Handle URL change ──────────────────────────────────────────────────────
+  function handleUrlChange(url) {
+    setBaseUrl(url)
+    setRpiUrl(getBaseUrl())
+    setFlaskConnected(false) // reset connection — will retry on next poll
+    addAlert('info', `RPi address changed to ${getBaseUrl()}`)
+  }
 
   // ─── Polling ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -124,20 +199,115 @@ export default function Dashboard() {
         }
 
         setStatus((prev) => {
-          // Detect source switch event
-          if (prev && prev.active_source !== data.active_source) {
-            addAlert('info', `Source switched: PS${prev.active_source} → PS${data.active_source}`)
+          if (prev) {
+            // Detect source switch
+            if (prev.active_source !== data.active_source) {
+              addAlert('info', `Source switched: PS${prev.active_source} → PS${data.active_source}`)
+            }
+            // Detect cutoff events
+            if (!prev.cutoff?.ps1 && data.cutoff?.ps1) {
+              addAlert('error', 'PS1 cutoff activated — overload protection triggered!')
+            }
+            if (prev.cutoff?.ps1 && !data.cutoff?.ps1) {
+              addAlert('success', 'PS1 cutoff restored — power line reconnected.')
+            }
+            if (!prev.cutoff?.ps2 && data.cutoff?.ps2) {
+              addAlert('error', 'PS2 cutoff activated — overload protection triggered!')
+            }
+            if (prev.cutoff?.ps2 && !data.cutoff?.ps2) {
+              addAlert('success', 'PS2 cutoff restored — power line reconnected.')
+            }
+            // Detect sensor connect/disconnect
+            if (prev.ps1?.sensor_connected && !data.ps1?.sensor_connected) {
+              addAlert('warning', `PS1 sensor disconnected${data.ps1?.error ? ': ' + data.ps1.error : ''}`)
+            }
+            if (!prev.ps1?.sensor_connected && data.ps1?.sensor_connected) {
+              addAlert('success', 'PS1 sensor connected — readings available.')
+            }
+            if (prev.ps2?.sensor_connected && !data.ps2?.sensor_connected) {
+              addAlert('warning', `PS2 sensor disconnected${data.ps2?.error ? ': ' + data.ps2.error : ''}`)
+            }
+            if (!prev.ps2?.sensor_connected && data.ps2?.sensor_connected) {
+              addAlert('success', 'PS2 sensor connected — readings available.')
+            }
           }
           return data
         })
 
-        // Voltage history
-        if (data.ps1.sensor_connected && data.ps1.voltage) {
-          setHistory((h) => [
-            ...h.slice(-(MAX_HISTORY - 1)),
-            { value: data.ps1.voltage, time: new Date().toLocaleTimeString() },
-          ])
+        // History — track voltage and power for both sources
+        const now = new Date().toLocaleTimeString()
+        if (data.ps1?.sensor_connected) {
+          if (data.ps1.voltage) {
+            setPs1VHistory((h) => [...h.slice(-(MAX_HISTORY - 1)), { value: data.ps1.voltage, time: now }])
+          }
+          if (data.ps1.power != null) {
+            setPs1PHistory((h) => [...h.slice(-(MAX_HISTORY - 1)), { value: data.ps1.power, time: now }])
+          }
         }
+        if (data.ps2?.sensor_connected) {
+          if (data.ps2.voltage) {
+            setPs2VHistory((h) => [...h.slice(-(MAX_HISTORY - 1)), { value: data.ps2.voltage, time: now }])
+          }
+          if (data.ps2.power != null) {
+            setPs2PHistory((h) => [...h.slice(-(MAX_HISTORY - 1)), { value: data.ps2.power, time: now }])
+          }
+        }
+        // ─── Overload detection for load sharing ────────────────────────
+        const p1 = data.ps1?.power ?? 0
+        const p2 = data.ps2?.power ?? 0
+        // PS2 effective load = 1W base + PS1 overflow
+        const ps1Over = Math.max(0, p1 - ps1Threshold)
+        const ps2Effective = 1 + ps1Over
+        const wasPs1Over = prevOverloadRef.current.ps1
+        const wasPs2Over = prevOverloadRef.current.ps2
+        const isPs1Over = p1 > ps1Threshold
+        const isPs2Over = ps2Effective > ps2Threshold
+
+        if (isPs1Over && !wasPs1Over) {
+          const overflow = p1 - ps1Threshold
+          const ps2Headroom = Math.max(0, ps2Threshold - ps2Effective)
+          const shared = Math.min(overflow, ps2Headroom)
+          addAlert('warning',
+            `⚡ PS1 overloaded! ${p1.toFixed(0)}W exceeds ${ps1Threshold}W. Sharing ${shared.toFixed(0)}W to PS2 (effective: ${ps2Effective.toFixed(0)}W).`
+          )
+        }
+        if (!isPs1Over && wasPs1Over) {
+          addAlert('success', 'PS1 load back within threshold.')
+        }
+        if (isPs2Over && !wasPs2Over) {
+          addAlert('warning',
+            `⚡ PS2 effective load ${ps2Effective.toFixed(0)}W (1W + ${ps1Over.toFixed(0)}W overflow) exceeds ${ps2Threshold}W threshold!`
+          )
+        }
+        if (!isPs2Over && wasPs2Over) {
+          addAlert('success', 'PS2 effective load back within threshold.')
+        }
+        prevOverloadRef.current = { ps1: isPs1Over, ps2: isPs2Over }
+
+        // ─── DTR detection: combined load exceeds total capacity ────────
+        const totalLoad = p1 + p2
+        const totalCapacity = ps1Threshold + ps2Threshold
+        const isDtr = totalLoad > totalCapacity
+
+        if (isDtr && !prevDtrRef.current && !dtrCutoffRef.current) {
+          const deficit = totalLoad - totalCapacity
+          addAlert('error',
+            `🚨 DEPLOY DTR! Combined load ${totalLoad.toFixed(0)}W exceeds total capacity ${totalCapacity}W. Deficit: ${deficit.toFixed(0)}W. Deploy Temporary Transformer immediately!`
+          )
+          // ── EMERGENCY: cut both power sources ──
+          addAlert('error',
+            '🔴 EMERGENCY CUTOFF: Both PS1 & PS2 power lines disconnected — all sockets and bulbs stopped.'
+          )
+          dtrCutoffRef.current = true
+          handleCutoff(1, true)   // cut PS1 (relay R5)
+          handleCutoff(2, true)   // cut PS2 (relay R6)
+        }
+
+        // Only show 'DTR cleared' if it was NOT an auto-cutoff (user manually restored)
+        if (!isDtr && prevDtrRef.current && !dtrCutoffRef.current) {
+          addAlert('success', 'DTR emergency cleared — combined load back within total capacity.')
+        }
+        prevDtrRef.current = isDtr
       } catch {
         setFlaskConnected(false)
         if (!demoMode) addAlert('error', 'Lost connection to Flask server.')
@@ -147,9 +317,9 @@ export default function Dashboard() {
     poll()
     const id = setInterval(poll, POLL_INTERVAL)
     return () => { mounted = false; clearInterval(id) }
-  }, [demoMode, addAlert])
+  }, [demoMode, rpiUrl, ps1Threshold, ps2Threshold, addAlert])
 
-  // ─── Scenario trigger ───────────────────────────────────────────────────────
+  // ─── Scenario trigger (demo only) ──────────────────────────────────────────
   function handleScenario(id) {
     setActiveScenario(id)
     scenarioRef.current = id
@@ -165,11 +335,11 @@ export default function Dashboard() {
       if (!demoMode) {
         await sendSwitch(source)
       } else {
-        // Simulate relay change in demo
         setStatus((prev) => ({
           ...prev,
           active_source: source,
           relays: {
+            ...prev.relays,
             ps1_l: source === 1, ps1_n: source === 1,
             ps2_l: source === 2, ps2_n: source === 2,
           },
@@ -193,6 +363,40 @@ export default function Dashboard() {
     }
   }
 
+  async function handleCutoff(source, cut) {
+    try {
+      if (!demoMode) {
+        await sendCutoff(source, cut)
+      } else {
+        setStatus((prev) => ({
+          ...prev,
+          relays: {
+            ...prev.relays,
+            [source === 1 ? 'ps1_cut' : 'ps2_cut']: cut,
+          },
+          cutoff: {
+            ...prev.cutoff,
+            [source === 1 ? 'ps1' : 'ps2']: cut,
+          },
+        }))
+      }
+
+      // If user is restoring power, clear the DTR auto-cutoff lock
+      if (!cut && dtrCutoffRef.current) {
+        dtrCutoffRef.current = false
+        prevDtrRef.current = false  // re-arm DTR detection from fresh
+        addAlert('info', 'DTR emergency cutoff released — DTR detection re-armed.')
+      }
+
+      addAlert(
+        cut ? 'warning' : 'success',
+        `PS${source} power line ${cut ? 'CUT — disconnected' : 'RESTORED — reconnected'}.`,
+      )
+    } catch {
+      addAlert('error', `Failed to ${cut ? 'cut' : 'restore'} PS${source}.`)
+    }
+  }
+
   if (!status) {
     return (
       <div className="flex-1 flex items-center justify-center bg-zinc-950">
@@ -204,7 +408,8 @@ export default function Dashboard() {
     )
   }
 
-  const isOverloaded = status.ps1.power > 4000
+  const ps1Overloaded = status.ps1?.power > 4000
+  const ps2Overloaded = status.ps2?.power > 4000
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950">
@@ -212,49 +417,115 @@ export default function Dashboard() {
         flaskConnected={flaskConnected}
         demoMode={demoMode}
         onDemoToggle={() => setDemoMode((d) => !d)}
+        rpiUrl={rpiUrl}
+        onUrlChange={handleUrlChange}
       />
 
       <main className="flex-1 p-4 lg:p-6 grid gap-4" style={{ gridTemplateColumns: '1fr' }}>
 
         {/* Row 1: Power source cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <PowerSourceCard id={1} data={status.ps1} isActive={status.active_source === 1} isOverloaded={isOverloaded} />
-          <PowerSourceCard id={2} data={status.ps2} isActive={status.active_source === 2} isOverloaded={false} />
+          <PowerSourceCard
+            id={1} data={status.ps1}
+            isActive={status.active_source === 1}
+            isOverloaded={ps1Overloaded}
+            isCutoff={status.cutoff?.ps1}
+          />
+          <PowerSourceCard
+            id={2} data={status.ps2}
+            isActive={status.active_source === 2}
+            isOverloaded={ps2Overloaded}
+            isCutoff={status.cutoff?.ps2}
+          />
         </div>
 
-        {/* Row 2: Load Distribution */}
-        <LoadDistribution ps1={status.ps1} ps2={status.ps2} activeSource={status.active_source} />
+        {/* Row 2: Load Sharing (automatic mode) */}
+        <LoadSharingPanel
+          ps1Power={status.ps1?.power}
+          ps2Power={status.ps2?.power}
+          ps1Threshold={ps1Threshold}
+          ps2Threshold={ps2Threshold}
+          onPs1ThresholdChange={setPs1Threshold}
+          onPs2ThresholdChange={setPs2Threshold}
+          ps1SensorOk={status.ps1?.sensor_connected}
+          ps2SensorOk={status.ps2?.sensor_connected}
+        />
+
+        {/* Row 3: Load Distribution */}
+        <LoadDistribution
+          ps1={status.ps1} ps2={status.ps2}
+          activeSource={status.active_source}
+          cutoff={status.cutoff}
+        />
 
         {/* Row 3: Relay panel (full width) */}
-        <RelayPanel relays={status.relays} />
+        <RelayPanel relays={status.relays} cutoff={status.cutoff} />
 
-        {/* Row 3: Chart + Controls */}
+        {/* Row 4: Voltage Charts — PS1 and PS2 */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <LiveChart
-            history={history}
+            history={ps1VHistory}
             label="PS1 Voltage"
             unit="V"
             color="#3b82f6"
             min={210}
             max={250}
           />
-          <ControlPanel
-            activeSource={status.active_source}
-            mode={status.mode}
-            onSwitch={handleSwitch}
-            onModeChange={handleModeChange}
-            switching={switching}
+          <LiveChart
+            history={ps2VHistory}
+            label="PS2 Voltage"
+            unit="V"
+            color="#8b5cf6"
+            min={210}
+            max={250}
           />
         </div>
 
-        {/* Row 4: Alerts + Scenarios */}
+        {/* Row 5: Load (Power) Charts — PS1 and PS2 */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <AlertFeed alerts={alerts} />
-          <ScenarioPanel onScenario={handleScenario} activeScenario={activeScenario} />
+          <LiveChart
+            history={ps1PHistory}
+            label="PS1 Load"
+            unit="W"
+            color="#22c55e"
+            min={0}
+            max={5000}
+          />
+          <LiveChart
+            history={ps2PHistory}
+            label="PS2 Load"
+            unit="W"
+            color="#a855f7"
+            min={0}
+            max={5000}
+          />
         </div>
 
-        {/* Row 5: Circuit diagram */}
-        <CircuitDiagram relays={status.relays} activeSource={status.active_source} />
+        {/* Row 6: Controls */}
+        <ControlPanel
+          activeSource={status.active_source}
+          mode={status.mode}
+          onSwitch={handleSwitch}
+          onModeChange={handleModeChange}
+          onCutoff={handleCutoff}
+          cutoff={status.cutoff}
+          switching={switching}
+        />
+
+        {/* Row 7: Alerts + Scenarios (scenarios only in demo mode) */}
+        <div className={`grid grid-cols-1 ${demoMode ? 'lg:grid-cols-2' : ''} gap-4`}>
+          <AlertFeed alerts={alerts} />
+          {demoMode && (
+            <ScenarioPanel onScenario={handleScenario} activeScenario={activeScenario} />
+          )}
+        </div>
+
+        {/* Row 8: Circuit diagram */}
+        <CircuitDiagram
+          relays={status.relays}
+          activeSource={status.active_source}
+          cutoff={status.cutoff}
+        />
 
       </main>
     </div>

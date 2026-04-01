@@ -16,7 +16,7 @@ GPIO map:
 
 PZEM:
     PS1 → /dev/ttyUSB0   slave addr 0x01
-    PS2 → /dev/ttyS0     slave addr 0x01  (hardware UART GPIO14/15 — wired, PZEM module arriving)
+    PS2 → /dev/ttyS0     slave addr 0x01  (hardware UART GPIO14/15 — PZEM-004T connected)
 """
 
 import time
@@ -55,6 +55,9 @@ state = {
     'mode': 'auto',          # 'auto' | 'manual'
     'ps1_cutoff': False,     # True = R5 energized = PWR1 cut
     'ps2_cutoff': False,
+    'dtr_cutoff': False,     # True = DTR emergency cutoff active (both cut)
+    'ps1_threshold': 2500,   # configurable from dashboard
+    'ps2_threshold': 2500,
 }
 
 pzem_cache = {
@@ -199,6 +202,23 @@ def poll_pzem():
                     'energy': None, 'frequency': None, 'pf': None, 'alarm': False,
                 }
 
+        # ── DTR detection: combined load exceeds total capacity ──────────
+        if state['mode'] == 'auto' and not state['dtr_cutoff']:
+            ps1_data = pzem_cache.get('ps1')
+            ps2_data = pzem_cache.get('ps2')
+            p1 = (ps1_data or {}).get('power') or 0
+            p2 = (ps2_data or {}).get('power') or 0
+            total_load = p1 + p2
+            total_capacity = state['ps1_threshold'] + state['ps2_threshold']
+
+            if total_load > total_capacity:
+                print(f"[DTR] EMERGENCY! Combined {total_load:.0f}W > capacity {total_capacity}W — cutting BOTH")
+                cut_power('R5')
+                state['ps1_cutoff'] = True
+                cut_power('R6')
+                state['ps2_cutoff'] = True
+                state['dtr_cutoff'] = True
+
         time.sleep(2)
 
 
@@ -241,6 +261,11 @@ def api_status():
         'cutoff': {
             'ps1': state['ps1_cutoff'],
             'ps2': state['ps2_cutoff'],
+        },
+        'dtr_cutoff': state['dtr_cutoff'],
+        'thresholds': {
+            'ps1': state['ps1_threshold'],
+            'ps2': state['ps2_threshold'],
         },
         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
     })
@@ -292,6 +317,10 @@ def api_cutoff():
     else:
         restore_power(relay)
         state[key] = False
+        # Clear DTR cutoff lock when user restores any source
+        if state['dtr_cutoff']:
+            state['dtr_cutoff'] = False
+            print("[DTR] Emergency cutoff released by manual restore.")
 
     return jsonify({'ok': True, 'source': source, 'cut': do_cut})
 
@@ -326,6 +355,29 @@ def api_relay():
     return jsonify({'ok': True, 'relay': relay, 'on': on})
 
 
+@app.route('/api/thresholds', methods=['POST'])
+def api_thresholds():
+    """
+    Set load sharing thresholds (synced from dashboard).
+    Body: { "ps1": 2500, "ps2": 2500 }
+    """
+    body = request.get_json(force=True)
+    ps1_t = body.get('ps1')
+    ps2_t = body.get('ps2')
+
+    if ps1_t is not None and isinstance(ps1_t, (int, float)) and ps1_t > 0:
+        state['ps1_threshold'] = int(ps1_t)
+    if ps2_t is not None and isinstance(ps2_t, (int, float)) and ps2_t > 0:
+        state['ps2_threshold'] = int(ps2_t)
+
+    print(f"[THRESHOLDS] Updated: PS1={state['ps1_threshold']}W  PS2={state['ps2_threshold']}W")
+    return jsonify({
+        'ok': True,
+        'ps1': state['ps1_threshold'],
+        'ps2': state['ps2_threshold'],
+    })
+
+
 @app.route('/api/ping', methods=['GET'])
 def api_ping():
     return jsonify({'ok': True})
@@ -342,10 +394,11 @@ if __name__ == '__main__':
     print("GridSentinel Flask server starting on 0.0.0.0:5000")
     print("Endpoints:")
     print("  GET  /api/status")
-    print("  POST /api/switch   { source: 1|2 }")
-    print("  POST /api/mode     { mode: auto|manual }")
-    print("  POST /api/cutoff   { source: 1|2, cut: true|false }")
-    print("  POST /api/relay    { relay: R1-R4, on: true|false }")
+    print("  POST /api/switch      { source: 1|2 }")
+    print("  POST /api/mode        { mode: auto|manual }")
+    print("  POST /api/cutoff      { source: 1|2, cut: true|false }")
+    print("  POST /api/thresholds  { ps1: 2500, ps2: 2500 }")
+    print("  POST /api/relay       { relay: R1-R6, on: true|false }")
     print("  GET  /api/ping")
 
     app.run(host='0.0.0.0', port=5000, debug=False)
