@@ -164,6 +164,7 @@ export default function Dashboard() {
   const [ps2Threshold, setPs2Threshold] = useState(2500)
 
   const scenarioRef = useRef('normal')
+  const demoCutoffRef = useRef({ ps1: false, ps2: false })   // persists manual R5/R6 cuts across demo polls
   const prevOverloadRef = useRef({ ps1: false, ps2: false })
   const prevDtrRef = useRef(false)
   const dtrCutoffRef = useRef(false)  // true = DTR auto-cutoff is active, suppress false 'cleared'
@@ -195,6 +196,23 @@ export default function Dashboard() {
         if (demoMode) {
           const base = getMockStatus()
           data = applyScenario(scenarioRef.current, base)
+          // Apply persistent manual cutoffs so R5/R6 cuts survive across polls
+          if (demoCutoffRef.current.ps1) {
+            data = {
+              ...data,
+              relays: { ...data.relays, ps1_cut: true },
+              cutoff: { ...data.cutoff, ps1: true },
+              ps1: { ...data.ps1, voltage: 0, current: 0, power: 0, frequency: 0, pf: 0 },
+            }
+          }
+          if (demoCutoffRef.current.ps2) {
+            data = {
+              ...data,
+              relays: { ...data.relays, ps2_cut: true },
+              cutoff: { ...data.cutoff, ps2: true },
+              ps2: { ...data.ps2, voltage: 0, current: 0, power: 0, frequency: 0, pf: 0 },
+            }
+          }
           setFlaskConnected(false)
         } else {
           data = await fetchStatus()
@@ -434,6 +452,47 @@ export default function Dashboard() {
     }
   }
 
+  async function handleRelayToggle(relay, on) {
+    try {
+      if (!demoMode) {
+        await sendRelay(relay, on)
+      } else {
+        // Track R5/R6 cuts so they persist across polls and zero out live readings
+        if (relay === 'R5') demoCutoffRef.current = { ...demoCutoffRef.current, ps1: on }
+        if (relay === 'R6') demoCutoffRef.current = { ...demoCutoffRef.current, ps2: on }
+        setStatus((prev) => {
+          if (!prev) return prev
+          const relayMap = { R1: 'ps1_l', R2: 'ps1_n', R3: 'ps2_l', R4: 'ps2_n', R5: 'ps1_cut', R6: 'ps2_cut' }
+          const field = relayMap[relay]
+          if (!field) return prev
+          const updated = { ...prev, relays: { ...prev.relays, [field]: on } }
+          if (relay === 'R5') {
+            updated.cutoff = { ...prev.cutoff, ps1: on }
+            if (on) updated.ps1 = { ...prev.ps1, voltage: 0, current: 0, power: 0, frequency: 0, pf: 0 }
+          }
+          if (relay === 'R6') {
+            updated.cutoff = { ...prev.cutoff, ps2: on }
+            if (on) updated.ps2 = { ...prev.ps2, voltage: 0, current: 0, power: 0, frequency: 0, pf: 0 }
+          }
+          return updated
+        })
+      }
+      if (relay === 'R5' || relay === 'R6') {
+        const src = relay === 'R5' ? 1 : 2
+        addAlert(
+          on ? 'error' : 'success',
+          on
+            ? `Transformer ${src} has failed — R${src + 4} cut, no output voltage or current.`
+            : `Transformer ${src} restored — R${src + 4} closed, power flowing again.`,
+        )
+      } else {
+        addAlert('info', `${relay} ${on ? 'energized' : 'released'} manually.`)
+      }
+    } catch {
+      addAlert('error', `Failed to toggle ${relay}.`)
+    }
+  }
+
   async function handleCutoff(source, cut) {
     try {
       if (!demoMode) {
@@ -559,7 +618,7 @@ export default function Dashboard() {
         />
 
         {/* Row 3: Relay panel (full width) */}
-        <RelayPanel relays={status.relays} cutoff={status.cutoff} />
+        <RelayPanel relays={status.relays} cutoff={status.cutoff} mode={status.mode} onRelayToggle={handleRelayToggle} />
 
         {/* Row 4: Voltage Charts — PS1 and PS2 */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

@@ -26,7 +26,7 @@ export default function PowerSourceCard({ id, data, isActive, isOverloaded, isCu
 
   if (isCutoff) {
     borderColor = 'border-red-700'
-    statusLabel = 'Cut Off'
+    statusLabel = 'No Output'
     statusColor = 'text-red-400'
     dotColor = 'bg-red-500 animate-pulse'
   } else if (isActive && data.alarm) {
@@ -72,15 +72,16 @@ export default function PowerSourceCard({ id, data, isActive, isOverloaded, isCu
 
       {/* Cutoff banner */}
       {isCutoff && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-950/50 border border-red-800/50">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5">
-            <circle cx="12" cy="12" r="10" />
-            <line x1="15" y1="9" x2="9" y2="15" />
-            <line x1="9" y1="9" x2="15" y2="15" />
+        <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-red-950/50 border border-red-800/50">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" className="shrink-0 mt-0.5">
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
-          <span className="text-red-400 text-xs font-semibold">
-            Power line disconnected — cutoff relay {id === 1 ? 'R5' : 'R6'} active
-          </span>
+          <div>
+            <p className="text-red-400 text-xs font-bold">Transformer {id} has failed — no output</p>
+            <p className="text-zinc-500 text-xs mt-0.5">Cutoff relay {id === 1 ? 'R5' : 'R6'} open · Voltage and current dropped to zero</p>
+          </div>
         </div>
       )}
 

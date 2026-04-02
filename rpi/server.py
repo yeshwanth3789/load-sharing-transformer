@@ -26,6 +26,116 @@ import RPi.GPIO as GPIO
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+try:
+    import smbus2 as _smbus2
+    _HAS_SMBUS = True
+except ImportError:
+    _HAS_SMBUS = False
+
+# ── Minimal HD44780 LCD driver (PCF8574 I2C backpack) ─────────────────────────
+_PIN_RS = 0x01
+_PIN_EN = 0x04
+_PIN_BL = 0x08
+_LCD_CMD = 0x00
+_LCD_CHR = _PIN_RS
+_ROW_OFFSETS = [0x00, 0x40, 0x14, 0x54]
+
+
+class _I2CLCD:
+    def __init__(self, bus=1, address=0x27, cols=16, rows=2):
+        self.bus  = _smbus2.SMBus(bus)
+        self.addr = address
+        self.cols = cols
+        self.rows = rows
+        self.bl   = _PIN_BL
+        self._init()
+
+    def _w(self, d):
+        self.bus.write_byte(self.addr, d | self.bl)
+
+    def _en(self, d):
+        time.sleep(0.0005)           # data-setup time before EN rises
+        self._w(d | _PIN_EN)
+        time.sleep(0.0005)           # EN pulse-width hold
+        self._w(d & ~_PIN_EN)
+        time.sleep(0.0001)           # EN fall hold
+
+    def _nibble(self, n, m):
+        self._w((n & 0xF0) | m)
+        self._en((n & 0xF0) | m)
+
+    def _byte(self, b, m):
+        self._nibble(b & 0xF0, m)
+        self._nibble((b << 4) & 0xF0, m)
+
+    def _init(self):
+        time.sleep(0.1)                                         # >40 ms after power-on
+        self._nibble(0x30, _LCD_CMD); time.sleep(0.0045)       # >4.1 ms
+        self._nibble(0x30, _LCD_CMD); time.sleep(0.0045)       # >4.1 ms
+        self._nibble(0x30, _LCD_CMD); time.sleep(0.0001)       # >100 µs
+        self._nibble(0x20, _LCD_CMD); time.sleep(0.001)        # switch to 4-bit
+        for cmd in (0x28, 0x08, 0x01):
+            self._byte(cmd, _LCD_CMD); time.sleep(0.003)       # 0x01 needs >1.52 ms
+        self._byte(0x06, _LCD_CMD); time.sleep(0.001)          # entry mode
+        self._byte(0x0C, _LCD_CMD); time.sleep(0.001)          # display on
+
+    def set_cursor(self, col, row):
+        self._byte(0x80 | (_ROW_OFFSETS[row] + col), _LCD_CMD)
+        time.sleep(0.002)
+
+    def print_line(self, text, row, align='left'):
+        text = text[:self.cols]
+        if align == 'center':
+            text = text.center(self.cols)
+        else:
+            text = text.ljust(self.cols)
+        self.set_cursor(0, row)
+        for ch in text:
+            self._byte(ord(ch), _LCD_CHR)
+
+    def clear(self):
+        self._byte(0x01, _LCD_CMD); time.sleep(0.002)
+
+    def close(self):
+        self.clear()
+        self.bl = 0
+        self._w(0)
+        self.bus.close()
+
+
+def _init_lcd():
+    """Scan I2C bus 1 and return an _I2CLCD instance, or None if not found."""
+    if not _HAS_SMBUS:
+        print('[LCD] smbus2 not installed — display disabled')
+        return None
+    b = _smbus2.SMBus(1)
+    found = []
+    for addr in range(0x03, 0x78):
+        try:
+            b.read_byte(addr)
+            found.append(addr)
+        except OSError:
+            pass
+    b.close()
+    for candidate in (0x27, 0x3F):
+        if candidate in found:
+            try:
+                lcd = _I2CLCD(address=candidate)
+                print(f'[LCD] Initialised at 0x{candidate:02X}')
+                return lcd
+            except Exception as e:
+                print(f'[LCD] Init failed at 0x{candidate:02X}: {e}')
+    if found:
+        try:
+            lcd = _I2CLCD(address=found[0])
+            print(f'[LCD] Initialised at 0x{found[0]:02X} (auto)')
+            return lcd
+        except Exception as e:
+            print(f'[LCD] Init failed: {e}')
+    print('[LCD] No I2C LCD found — display disabled')
+    return None
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 PS1_PORT      = '/dev/ttyUSB0'
 PS2_PORT      = '/dev/ttyS0'    # hardware UART — GPIO 14 (TX) and 15 (RX)
@@ -66,6 +176,61 @@ pzem_cache = {
 }
 
 pzem_lock = threading.Lock()
+
+_lcd      = None            # set in __main__ after gpio_setup
+_lcd_lock = threading.Lock()
+
+
+def _lcd_write(line0: str, line1: str):
+    """Thread-safe helper — write two lines to the LCD if present."""
+    with _lcd_lock:
+        if _lcd is None:
+            return
+        try:
+            _lcd.print_line(line0, 0)
+            _lcd.print_line(line1, 1)
+        except Exception as e:
+            print(f'[LCD] Write error: {e}')
+
+
+def lcd_loop():
+    """Background thread — refreshes LCD every 2 s based on system state."""
+    last = ('', '')
+    while True:
+        try:
+            ps1_cut = state['ps1_cutoff']
+            ps2_cut = state['ps2_cutoff']
+            dtr     = state['dtr_cutoff']
+
+            if dtr or (ps1_cut and ps2_cut):
+                line0 = '!! DEPLOY  DTR !!'
+                line1 = 'All power  cut!!'
+            elif ps1_cut:
+                line0 = 'Transformer 1'
+                line1 = 'Failed-No Output'
+            elif ps2_cut:
+                line0 = 'Transformer 2'
+                line1 = 'Failed-No Output'
+            else:
+                with pzem_lock:
+                    p1 = pzem_cache['ps1']
+                    p2 = pzem_cache['ps2']
+                v1 = f"{p1['voltage']:.0f}V" if p1 and p1.get('voltage') else '---V'
+                w1 = f"{p1['power']:.0f}W"   if p1 and p1.get('power')   else '---W'
+                v2 = f"{p2['voltage']:.0f}V" if p2 and p2.get('voltage') else '---V'
+                w2 = f"{p2['power']:.0f}W"   if p2 and p2.get('power')   else '---W'
+                line0 = f'PS1 {v1} {w1}'
+                line1 = f'PS2 {v2} {w2}'
+
+            if (line0, line1) != last:
+                _lcd_write(line0, line1)
+                last = (line0, line1)
+
+        except Exception as e:
+            print(f'[LCD] Loop error: {e}')
+
+        time.sleep(2)
+
 
 # ── GPIO setup ────────────────────────────────────────────────────────────────
 def gpio_setup():
@@ -390,9 +555,19 @@ def api_ping():
 if __name__ == '__main__':
     gpio_setup()
 
+    # Init LCD (optional — server works fine without it)
+    _lcd = _init_lcd()
+    if _lcd:
+        _lcd_write('GridSentinel', 'Starting...')
+        time.sleep(1)
+
     # Start PZEM polling in background
     t = threading.Thread(target=poll_pzem, daemon=True)
     t.start()
+
+    # Start LCD refresh loop in background
+    t2 = threading.Thread(target=lcd_loop, daemon=True)
+    t2.start()
 
     print("GridSentinel Flask server starting on 0.0.0.0:5000")
     print("Endpoints:")

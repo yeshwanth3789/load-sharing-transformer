@@ -62,10 +62,11 @@ class I2CLCD:
 
     def _pulse_enable(self, data: int):
         """Toggle the EN pin to latch the nibble."""
+        time.sleep(0.0005)                        # data-setup time before EN rises
         self._write_i2c(data | PIN_EN)
-        time.sleep(0.0005)
+        time.sleep(0.0005)                        # EN pulse-width hold
         self._write_i2c(data & ~PIN_EN)
-        time.sleep(0.0001)
+        time.sleep(0.0001)                        # EN fall hold
 
     def _send_nibble(self, nibble: int, mode: int):
         """Send the upper 4 bits as one nibble."""
@@ -90,16 +91,18 @@ class I2CLCD:
 
     def _init_lcd(self):
         """Initialise the HD44780 in 4-bit mode (3-step power-on sequence)."""
-        time.sleep(0.05)
-        self._send_nibble(0x30, LCD_CMD); time.sleep(0.005)
-        self._send_nibble(0x30, LCD_CMD); time.sleep(0.001)
-        self._send_nibble(0x30, LCD_CMD); time.sleep(0.001)
-        self._send_nibble(0x20, LCD_CMD)          # switch to 4-bit mode
+        time.sleep(0.1)                           # wait >40 ms after power-on
+        self._send_nibble(0x30, LCD_CMD); time.sleep(0.0045)   # >4.1 ms
+        self._send_nibble(0x30, LCD_CMD); time.sleep(0.0045)   # >4.1 ms
+        self._send_nibble(0x30, LCD_CMD); time.sleep(0.0001)   # >100 µs
+        self._send_nibble(0x20, LCD_CMD); time.sleep(0.001)    # switch to 4-bit
         self.command(CMD_FUNCTION_4BIT)
-        self.command(CMD_DISPLAY_ON)
+        self.command(CMD_DISPLAY_OFF)
         self.command(CMD_CLEAR)
+        time.sleep(0.003)                         # clear needs >1.52 ms
         self.command(CMD_ENTRY_MODE)
-        time.sleep(0.002)
+        self.command(CMD_DISPLAY_ON)
+        time.sleep(0.001)
 
     def clear(self):
         self.command(CMD_CLEAR)
