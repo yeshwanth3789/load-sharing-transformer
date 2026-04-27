@@ -171,6 +171,7 @@ export default function Dashboard() {
   const ps1OverloadCutoffRef = useRef(false)  // true = PS1 overload cutoff pending/active — suppresses re-trigger
   const ps1CutoffActiveRef = useRef(false)    // true = PS1 intentionally cut — suppresses sensor/cutoff alerts
   const ps1OverloadTimerRef = useRef(null)    // holds the 2-second cutoff timeout
+  const ps1OverloadCooldownRef = useRef(0)    // timestamp of last overload fire — enforces 15s re-arm delay
   const [ps1OverloadPrompt, setPs1OverloadPrompt] = useState(null)  // { ps2Available } or null
 
   const addAlert = useCallback((type, message) => {
@@ -290,15 +291,18 @@ export default function Dashboard() {
         const isPs1Over = p1 > ps1Threshold
         const isPs2Over = ps2Effective > ps2Threshold
 
-        if (isPs1Over && !wasPs1Over && !ps1OverloadCutoffRef.current) {
+        const cooldownExpired = Date.now() - ps1OverloadCooldownRef.current > 15000
+        if (isPs1Over && !wasPs1Over && !ps1OverloadCutoffRef.current && cooldownExpired) {
           const ps2Available = Math.max(0, ps2Threshold - p2)
           addAlert('warning',
             `⚡ PS1 overloaded! ${p1.toFixed(0)}W exceeds ${ps1Threshold}W threshold. Cutting PS1 power in 2 seconds…`
           )
           ps1OverloadCutoffRef.current = true
           ps1OverloadTimerRef.current = setTimeout(() => {
+            ps1OverloadTimerRef.current = null  // clear stale ref so recovery logic can't accidentally re-arm
+            ps1OverloadCooldownRef.current = Date.now()  // start 15s cooldown
             ps1CutoffActiveRef.current = true  // mark PS1 as intentionally cut — suppress sensor/cutoff alerts
-            // Cut PS1: turn off changeover relays R1/R2, then cut R5
+            // Step 1 — Cut PS1: turn off changeover relays R1/R2, then cut R5
             if (!demoMode) {
               sendRelay('R1', false).catch(() => {})
               sendRelay('R2', false).catch(() => {})
@@ -310,7 +314,18 @@ export default function Dashboard() {
                 cutoff: { ...prev.cutoff, ps1: true },
               }) : prev)
             }
-            addAlert('error', '🔴 PS1 load exceeds threshold — socket and bulb stopped.')
+            addAlert('error', '🔴 PS1 overload — PS1 disconnected.')
+            // Step 2 — Auto switch to PS2 for load sharing (no user confirmation needed)
+            if (!demoMode) {
+              sendSwitch(2).catch(() => {})
+            } else {
+              setStatus((prev) => prev ? ({
+                ...prev,
+                active_source: 2,
+                relays: { ...prev.relays, ps1_l: true, ps1_n: true, ps2_l: false, ps2_n: false },
+              }) : prev)
+            }
+            addAlert('info', `⚡ Auto load sharing — relay switched, PS2 now supplying ${ps2Available.toFixed(0)}W overflow. Both PS1 & PS2 active.`)
             setPs1OverloadPrompt({ ps2Available })
           }, 2000)
         }
@@ -319,7 +334,7 @@ export default function Dashboard() {
           if (!ps1OverloadCutoffRef.current) {
             addAlert('success', 'PS1 load back within threshold.')
           }
-          // Cancel pending cutoff only if load genuinely recovered before the 2s timer fired
+          // Only cancel and re-arm if the timer is still pending (not a stale post-fire ref)
           if (ps1OverloadTimerRef.current) {
             clearTimeout(ps1OverloadTimerRef.current)
             ps1OverloadTimerRef.current = null
@@ -428,28 +443,9 @@ export default function Dashboard() {
     }
   }
 
-  async function handlePs1OverloadOkay() {
+  function handlePs1OverloadOkay() {
     setPs1OverloadPrompt(null)
-    // Do NOT reset ps1OverloadCutoffRef here — keeping it true prevents the poll loop from
-    // re-detecting the (now 0W) PS1 as "recovered" and then re-arming, which would let a
-    // stale reading trigger the 2-second cut timer again and turn the relay off.
-    // It will be cleared when the operator explicitly restores PS1 via handleCutoff(1, false).
-    try {
-      if (!demoMode) {
-        // Energize R1+R2 (NO path: PS2 feeds PS1 load side) — switch_to_source(2) handles this
-        await sendSwitch(2)
-      } else {
-        // Switch to PS2: R1/R2 energize (NO path) so PS2 feeds PS1's socket+bulb
-        setStatus((prev) => prev ? ({
-          ...prev,
-          active_source: 2,
-          relays: { ...prev.relays, ps1_l: true, ps1_n: true, ps2_l: false, ps2_n: false },
-        }) : prev)
-      }
-      addAlert('info', '⚡ Load sharing from PS2 — socket and bulb now powered from Both ps1 and PS2.')
-    } catch {
-      addAlert('error', 'Failed to switch to PS2.')
-    }
+    // Relay was already switched automatically — this just dismisses the info banner
   }
 
   async function handleRelayToggle(relay, on) {
@@ -547,6 +543,20 @@ export default function Dashboard() {
 
   const ps1Overloaded = status.ps1?.power > 4000
   const ps2Overloaded = status.ps2?.power > 4000
+  const ps1SharingW   = Math.max(0, Math.round((status.ps1?.power ?? 0) - ps1Threshold))
+  const ps2SharingW   = Math.max(0, Math.round((status.ps2?.power ?? 0) - ps2Threshold))
+  const ps1Sharing    = ps1SharingW > 0 && !status.cutoff?.ps1
+  const ps2Sharing    = ps2SharingW > 0 && !status.cutoff?.ps2
+
+  // Filter alerts per power source for the per-card event strip
+  const ps1Alerts = alerts.filter(a => {
+    const m = a.message.toLowerCase()
+    return m.includes('ps1') || m.includes('transformer 1') || m.includes('r5')
+  })
+  const ps2Alerts = alerts.filter(a => {
+    const m = a.message.toLowerCase()
+    return m.includes('ps2') || m.includes('transformer 2') || m.includes('r6')
+  })
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950">
@@ -567,33 +577,41 @@ export default function Dashboard() {
             isActive={status.active_source === 1}
             isOverloaded={ps1Overloaded}
             isCutoff={status.cutoff?.ps1}
+            isSharing={ps1Sharing}
+            sharingW={ps1SharingW}
+            alerts={ps1Alerts}
           />
           <PowerSourceCard
             id={2} data={status.ps2}
             isActive={status.active_source === 2}
             isOverloaded={ps2Overloaded}
             isCutoff={status.cutoff?.ps2}
+            isSharing={ps2Sharing}
+            sharingW={ps2SharingW}
+            alerts={ps2Alerts}
           />
         </div>
 
-        {/* PS1 Overload — OK to transfer load to PS2 */}
+        {/* PS1 Overload — auto-switched banner */}
         {ps1OverloadPrompt && (
-          <div className="border border-orange-500 bg-orange-950/50 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="border border-green-600 bg-green-950/40 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div className="flex items-start gap-3">
               <span className="text-2xl leading-none">⚡</span>
               <div>
-                <p className="text-orange-400 font-bold text-sm">PS1 Overload — now power from both ps1 and ps2</p>
-                <p className="text-zinc-300 text-sm mt-0.5">PS1 socket and bulb are stopped.</p>
-                <p className="text-green-400 text-sm font-medium mt-1">
-                  PS2 has <span className="font-bold text-green-300">{ps1OverloadPrompt.ps2Available.toFixed(0)}W</span> available — ready to take the load.
+                <p className="text-green-400 font-bold text-sm">Load Sharing Active — Relay auto-switched to PS2</p>
+                <p className="text-zinc-300 text-sm mt-0.5">
+                  PS1 exceeded threshold. Relay switched automatically — PS2 is now supplying the overflow load.
+                </p>
+                <p className="text-green-300 text-sm font-medium mt-1">
+                  PS2 contributing <span className="font-bold">{ps1OverloadPrompt.ps2Available.toFixed(0)}W</span> — both sources active.
                 </p>
               </div>
             </div>
             <button
               onClick={handlePs1OverloadOkay}
-              className="bg-green-600 hover:bg-green-500 active:bg-green-700 text-white font-bold px-6 py-2.5 rounded-lg text-sm transition-colors shrink-0"
+              className="bg-zinc-700 hover:bg-zinc-600 active:bg-zinc-800 text-zinc-200 font-bold px-6 py-2.5 rounded-lg text-sm transition-colors shrink-0"
             >
-              OK — Switch to PS2
+              Dismiss
             </button>
           </div>
         )}

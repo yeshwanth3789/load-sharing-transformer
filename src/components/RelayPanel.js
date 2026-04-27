@@ -1,5 +1,27 @@
 'use client'
 
+import { useState, useEffect } from 'react'
+
+const AUTO_RESTORE_SECS = 15
+
+function useCutCountdown(isCut) {
+  const [secs, setSecs] = useState(null)
+
+  useEffect(() => {
+    if (!isCut) { setSecs(null); return }
+    setSecs(AUTO_RESTORE_SECS)
+    const iv = setInterval(() => {
+      setSecs((s) => {
+        if (s === null || s <= 1) { clearInterval(iv); return null }
+        return s - 1
+      })
+    }, 1000)
+    return () => clearInterval(iv)
+  }, [isCut])
+
+  return secs
+}
+
 function ChangeoverRelay({ label, active, psLabel, wire, manual, onToggle }) {
   return (
     <div className={`flex flex-col items-center gap-2 px-4 py-3 rounded-lg border transition-colors duration-500 ${
@@ -39,11 +61,13 @@ function ChangeoverRelay({ label, active, psLabel, wire, manual, onToggle }) {
 }
 
 function CutoffRelay({ label, gpioPin, psLabel, isCut, manual, onToggle }) {
+  const countdown = useCutCountdown(isCut)
+
   return (
     <div className={`flex flex-col items-center gap-2 px-4 py-3 rounded-lg border transition-colors duration-500 ${
       isCut ? 'border-red-600 bg-red-900/20' : 'border-emerald-800/40 bg-emerald-900/10'
     }`}>
-      {/* Cutoff symbol - scissors / break */}
+      {/* Cutoff symbol */}
       <svg width="28" height="20" viewBox="0 0 28 20" fill="none">
         {isCut ? (
           <>
@@ -59,13 +83,31 @@ function CutoffRelay({ label, gpioPin, psLabel, isCut, manual, onToggle }) {
           </>
         )}
       </svg>
+
       <span className={`text-xs font-bold ${isCut ? 'text-red-400' : 'text-emerald-400'}`}>
         {isCut ? '⚡ CUT' : '● FLOWING'}
       </span>
+
       <div className="text-center">
         <span className="text-zinc-300 text-xs font-medium block">{label}</span>
         <span className="text-zinc-500 text-[10px]">{psLabel} cutoff · GPIO {gpioPin}</span>
       </div>
+
+      {/* Countdown bar — shown while relay is cut */}
+      {isCut && countdown !== null && (
+        <div className="w-full flex flex-col gap-1">
+          <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-red-500 rounded-full transition-all duration-1000"
+              style={{ width: `${(countdown / AUTO_RESTORE_SECS) * 100}%` }}
+            />
+          </div>
+          <span className="text-red-400 text-[10px] text-center">
+            Auto-restore in {countdown}s
+          </span>
+        </div>
+      )}
+
       {manual && (
         <button
           onClick={() => onToggle(label, !isCut)}
@@ -75,7 +117,7 @@ function CutoffRelay({ label, gpioPin, psLabel, isCut, manual, onToggle }) {
               : 'bg-red-700 hover:bg-red-600 text-white'
           }`}
         >
-          {isCut ? 'RESTORE' : 'CUT'}
+          {isCut ? 'RESTORE NOW' : 'CUT'}
         </button>
       )}
     </div>

@@ -90,19 +90,29 @@ class I2CLCD:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def _init_lcd(self):
-        """Initialise the HD44780 in 4-bit mode (3-step power-on sequence)."""
-        time.sleep(0.1)                           # wait >40 ms after power-on
-        self._send_nibble(0x30, LCD_CMD); time.sleep(0.0045)   # >4.1 ms
-        self._send_nibble(0x30, LCD_CMD); time.sleep(0.0045)   # >4.1 ms
-        self._send_nibble(0x30, LCD_CMD); time.sleep(0.0001)   # >100 µs
-        self._send_nibble(0x20, LCD_CMD); time.sleep(0.001)    # switch to 4-bit
-        self.command(CMD_FUNCTION_4BIT)
-        self.command(CMD_DISPLAY_OFF)
-        self.command(CMD_CLEAR)
-        time.sleep(0.003)                         # clear needs >1.52 ms
-        self.command(CMD_ENTRY_MODE)
-        self.command(CMD_DISPLAY_ON)
-        time.sleep(0.001)
+        """Initialise the HD44780 in 4-bit mode — JHD 162A safe timing."""
+        time.sleep(0.3)                           # JHD 162A needs >200 ms cold-start
+
+        # Send 0x30 four times (8-bit reset — extra pulse for reliability)
+        for delay in (0.005, 0.005, 0.002, 0.002):
+            self._send_nibble(0x30, LCD_CMD)
+            time.sleep(delay)
+
+        # Switch to 4-bit interface
+        self._send_nibble(0x20, LCD_CMD)
+        time.sleep(0.01)                          # let it settle in 4-bit mode
+
+        # From here all commands are sent as two nibbles
+        self.command(CMD_FUNCTION_4BIT)           # 0x28 — 4-bit, 2-line, 5×8
+        time.sleep(0.005)
+        self.command(CMD_DISPLAY_OFF)             # 0x08 — display off
+        time.sleep(0.005)
+        self.command(CMD_CLEAR)                   # 0x01 — clear
+        time.sleep(0.005)                         # clear needs >1.52 ms; give 5 ms
+        self.command(CMD_ENTRY_MODE)              # 0x06 — left-to-right, no shift
+        time.sleep(0.005)
+        self.command(CMD_DISPLAY_ON)              # 0x0C — display on, cursor off
+        time.sleep(0.005)
 
     def clear(self):
         self.command(CMD_CLEAR)

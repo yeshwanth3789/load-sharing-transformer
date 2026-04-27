@@ -21,16 +21,165 @@ PZEM:
 
 import time
 import threading
+import json
+import os
 import minimalmodbus
 import RPi.GPIO as GPIO
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
+STATE_FILE        = '/tmp/gridsentinel_state.json'
+AUTO_RESTORE_SECS = 15   # seconds before a manually-cut relay is auto-restored
+
+# ── Auto-restore timers ───────────────────────────────────────────────────────
+_restore_timers      = {'R5': None, 'R6': None}
+_restore_timer_lock  = threading.Lock()
+
+
+def _auto_restore(relay: str):
+    """
+    Fired by threading.Timer after AUTO_RESTORE_SECS.
+    Restores the cutoff relay AND resets the matching changeover relays to NC
+    so that power flows straight through to the load (bulb + holder turn on).
+    """
+    key = 'ps1_cutoff' if relay == 'R5' else 'ps2_cutoff'
+
+    # Step 1: restore power line
+    restore_power(relay)
+    state[key] = False
+
+    # Step 2: put changeover relays back to NC (home source path)
+    # R5 → PWR1 line → NC of R1/R2 feeds PS1 load (bulb + holder)
+    # R6 → PWR2 line → NC of R3/R4 feeds PS2 load
+    if relay == 'R5':
+        set_changeover('R1', False)   # NC: PWR1-L → PS1 load L
+        set_changeover('R2', False)   # NC: PWR1-N → PS1 load N
+        state['active_source'] = 1
+    else:
+        set_changeover('R3', False)   # NC: PWR2-L → PS2 load L
+        set_changeover('R4', False)   # NC: PWR2-N → PS2 load N
+
+    # Step 3: clear DTR lock if both lines are now live
+    if not state['ps1_cutoff'] and not state['ps2_cutoff']:
+        state['dtr_cutoff'] = False
+
+    _save_cutoff_state()
+    print(f'[AUTO-RESTORE] {relay} restored after {AUTO_RESTORE_SECS} s — changeover relays reset to NC, load powered')
+    with _restore_timer_lock:
+        _restore_timers[relay] = None
+
+
+def _schedule_restore(relay: str):
+    """Start (or restart) the AUTO_RESTORE_SECS countdown for relay R5 or R6."""
+    with _restore_timer_lock:
+        existing = _restore_timers.get(relay)
+        if existing:
+            existing.cancel()
+        t = threading.Timer(AUTO_RESTORE_SECS, _auto_restore, args=[relay])
+        t.daemon = True
+        t.start()
+        _restore_timers[relay] = t
+
+
+def _cancel_restore(relay: str):
+    """Cancel a pending auto-restore (used when user manually restores first)."""
+    with _restore_timer_lock:
+        t = _restore_timers.get(relay)
+        if t:
+            t.cancel()
+            _restore_timers[relay] = None
+
+
+def _save_cutoff_state():
+    """Persist cutoff flags so they survive server restarts."""
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump({
+                'ps1_cutoff': state['ps1_cutoff'],
+                'ps2_cutoff': state['ps2_cutoff'],
+                'dtr_cutoff': state['dtr_cutoff'],
+            }, f)
+    except Exception as e:
+        print(f'[STATE] Save failed: {e}')
+
+
+def _load_cutoff_state():
+    """Load and reapply GPIO cutoff state from last run."""
+    if not os.path.exists(STATE_FILE):
+        return
+    try:
+        with open(STATE_FILE) as f:
+            saved = json.load(f)
+        if saved.get('ps1_cutoff'):
+            cut_power('R5')
+            state['ps1_cutoff'] = True
+            _schedule_restore('R5')
+            print('[STATE] Restored: PS1 cutoff (R5) active — auto-restore in 15 s')
+        if saved.get('ps2_cutoff'):
+            cut_power('R6')
+            state['ps2_cutoff'] = True
+            _schedule_restore('R6')
+            print('[STATE] Restored: PS2 cutoff (R6) active — auto-restore in 15 s')
+        if saved.get('dtr_cutoff'):
+            state['dtr_cutoff'] = True
+    except Exception as e:
+        print(f'[STATE] Load failed: {e}')
 
 try:
     import smbus2 as _smbus2
     _HAS_SMBUS = True
 except ImportError:
     _HAS_SMBUS = False
+
+try:
+    import serial as _serial
+    _HAS_SERIAL = True
+except ImportError:
+    _HAS_SERIAL = False
+
+# ── GSM / SMS config ──────────────────────────────────────────────────────────
+GSM_PORT         = '/dev/ttyS0'     # shared with PS2 PZEM — protected by _ttyS0_lock
+GSM_BAUD         = 9600
+ALERT_NUMBER     = '9553886260'
+SMS_COOLDOWN     = 60               # seconds between identical SMS types
+
+_ttyS0_lock      = threading.Lock()  # shared between PS2 PZEM reads and GSM SMS sends
+_sms_last_sent   = {}               # key → epoch timestamp of last send
+
+
+def send_sms(key: str, message: str):
+    """
+    Send an SMS via the GSM module using AT commands.
+    key is used to enforce SMS_COOLDOWN — same key won't fire again within the window.
+    Runs in a daemon thread so it never blocks the Flask or poll loops.
+    """
+    if not _HAS_SERIAL:
+        print(f'[GSM] pyserial not installed — SMS skipped ({key})')
+        return
+    now = time.time()
+    if now - _sms_last_sent.get(key, 0) < SMS_COOLDOWN:
+        return
+    _sms_last_sent[key] = now
+
+    def _worker():
+        with _ttyS0_lock:   # wait for PS2 PZEM to finish its current read
+            try:
+                gsm = _serial.Serial(GSM_PORT, GSM_BAUD, timeout=5)
+                time.sleep(0.3)
+                gsm.reset_input_buffer()
+                gsm.write(b'AT\r');            time.sleep(0.5)
+                gsm.reset_input_buffer()
+                gsm.write(b'AT+CMGF=1\r');    time.sleep(0.5)   # text mode
+                gsm.reset_input_buffer()
+                gsm.write(f'AT+CMGS="{ALERT_NUMBER}"\r'.encode()); time.sleep(0.5)
+                gsm.write(message.encode('ascii', errors='replace') + b'\x1a')  # Ctrl-Z sends
+                time.sleep(3)
+                gsm.close()
+                print(f'[GSM] SMS sent ({key}): {message}')
+            except Exception as e:
+                print(f'[GSM] SMS failed ({key}): {e}')
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 # ── Minimal HD44780 LCD driver (PCF8574 I2C backpack) ─────────────────────────
 _PIN_RS = 0x01
@@ -69,15 +218,13 @@ class _I2CLCD:
         self._nibble((b << 4) & 0xF0, m)
 
     def _init(self):
-        time.sleep(0.1)                                         # >40 ms after power-on
-        self._nibble(0x30, _LCD_CMD); time.sleep(0.0045)       # >4.1 ms
-        self._nibble(0x30, _LCD_CMD); time.sleep(0.0045)       # >4.1 ms
-        self._nibble(0x30, _LCD_CMD); time.sleep(0.0001)       # >100 µs
-        self._nibble(0x20, _LCD_CMD); time.sleep(0.001)        # switch to 4-bit
-        for cmd in (0x28, 0x08, 0x01):
-            self._byte(cmd, _LCD_CMD); time.sleep(0.003)       # 0x01 needs >1.52 ms
-        self._byte(0x06, _LCD_CMD); time.sleep(0.001)          # entry mode
-        self._byte(0x0C, _LCD_CMD); time.sleep(0.001)          # display on
+        time.sleep(0.3)                                         # JHD 162A needs >200 ms
+        for delay in (0.005, 0.005, 0.002, 0.002):
+            self._nibble(0x30, _LCD_CMD); time.sleep(delay)    # 4× 8-bit reset
+        self._nibble(0x20, _LCD_CMD); time.sleep(0.01)         # switch to 4-bit
+        for cmd, wait in ((0x28, 0.005), (0x08, 0.005), (0x01, 0.005),
+                          (0x06, 0.005), (0x0C, 0.005)):
+            self._byte(cmd, _LCD_CMD); time.sleep(wait)
 
     def set_cursor(self, col, row):
         self._byte(0x80 | (_ROW_OFFSETS[row] + col), _LCD_CMD)
@@ -193,9 +340,42 @@ def _lcd_write(line0: str, line1: str):
             print(f'[LCD] Write error: {e}')
 
 
+def _lcd_scroll_alert(header: str, message: str, while_fn=None, step: float = 0.28):
+    """
+    Show header on row 0 and scroll message on row 1.
+    Keeps scrolling while while_fn() returns True.
+    Defaults to scrolling while any cutoff flag is set.
+    step = seconds per character shift.
+    """
+    if while_fn is None:
+        def while_fn():
+            return state['ps1_cutoff'] or state['ps2_cutoff'] or state['dtr_cutoff']
+
+    with _lcd_lock:
+        if _lcd is None:
+            time.sleep(step)
+            return
+        cols = _lcd.cols
+
+    padded  = ' ' * cols + message + ' ' * cols
+    pad_len = len(padded)
+    i = 0
+
+    while while_fn():
+        frame = (padded + padded)[i: i + cols]
+        with _lcd_lock:
+            if _lcd:
+                try:
+                    _lcd.print_line(header, 0, align='center')
+                    _lcd.print_line(frame,  1)
+                except Exception as e:
+                    print(f'[LCD] Scroll error: {e}')
+        i = (i + 1) % pad_len
+        time.sleep(step)
+
+
 def lcd_loop():
-    """Background thread — refreshes LCD every 2 s based on system state."""
-    last = ('', '')
+    """Background thread — scrolls alerts on cutoff, shows live readings otherwise."""
     while True:
         try:
             ps1_cut = state['ps1_cutoff']
@@ -203,33 +383,80 @@ def lcd_loop():
             dtr     = state['dtr_cutoff']
 
             if dtr or (ps1_cut and ps2_cut):
-                line0 = '!! DEPLOY  DTR !!'
-                line1 = 'All power  cut!!'
+                _lcd_scroll_alert(
+                    '  !! ALERT !!',
+                    'Transformer 1 & 2 have failed - No output for all sources!'
+                )
+
+            elif ps1_cut and state['active_source'] == 2:
+                # PS1 was cut due to overload — PS2 is now supplying the load (load sharing)
+                with pzem_lock:
+                    p2d = pzem_cache['ps2']
+                pw2  = (p2d or {}).get('power') or 0
+                t1   = state['ps1_threshold']
+                over = max(0, pw2 - 1)   # PS2 effective overflow contribution
+                def _sharing_active():
+                    return state['ps1_cutoff'] and state['active_source'] == 2
+                _lcd_scroll_alert(
+                    ' LOAD SHARING ',
+                    f'PS1 cut - Load sharing from PS2  PS2:{pw2:.0f}W active  ',
+                    while_fn=_sharing_active,
+                )
+
             elif ps1_cut:
-                line0 = 'Transformer 1'
-                line1 = 'Failed-No Output'
+                _lcd_scroll_alert(
+                    '  !! ALERT !!',
+                    'Transformer 1 has failed - No output for all sources!'
+                )
+
             elif ps2_cut:
-                line0 = 'Transformer 2'
-                line1 = 'Failed-No Output'
+                _lcd_scroll_alert(
+                    '  !! ALERT !!',
+                    'Transformer 2 has failed - No output for all sources!'
+                )
+
             else:
                 with pzem_lock:
-                    p1 = pzem_cache['ps1']
-                    p2 = pzem_cache['ps2']
-                v1 = f"{p1['voltage']:.0f}V" if p1 and p1.get('voltage') else '---V'
-                w1 = f"{p1['power']:.0f}W"   if p1 and p1.get('power')   else '---W'
-                v2 = f"{p2['voltage']:.0f}V" if p2 and p2.get('voltage') else '---V'
-                w2 = f"{p2['power']:.0f}W"   if p2 and p2.get('power')   else '---W'
-                line0 = f'PS1 {v1} {w1}'
-                line1 = f'PS2 {v2} {w2}'
+                    p1d = pzem_cache['ps1']
+                    p2d = pzem_cache['ps2']
+                pw1 = (p1d or {}).get('power') or 0
+                pw2 = (p2d or {}).get('power') or 0
+                t1  = state['ps1_threshold']
+                t2  = state['ps2_threshold']
 
-            if (line0, line1) != last:
-                _lcd_write(line0, line1)
-                last = (line0, line1)
+                if pw1 > t1 and not state['ps1_cutoff']:
+                    over = pw1 - t1
+                    def _ps1_over():
+                        return ((pzem_cache.get('ps1') or {}).get('power') or 0) > state['ps1_threshold'] \
+                               and not state['ps1_cutoff']
+                    _lcd_scroll_alert(
+                        ' LOAD SHARING ',
+                        f'PS1:{pw1:.0f}W>{t1:.0f}W - Sharing {over:.0f}W from PS2  ',
+                        while_fn=_ps1_over,
+                    )
+
+                elif pw2 > t2 and not state['ps2_cutoff']:
+                    over = pw2 - t2
+                    def _ps2_over():
+                        return ((pzem_cache.get('ps2') or {}).get('power') or 0) > state['ps2_threshold'] \
+                               and not state['ps2_cutoff']
+                    _lcd_scroll_alert(
+                        ' LOAD SHARING ',
+                        f'PS2:{pw2:.0f}W>{t2:.0f}W - Sharing {over:.0f}W from PS1  ',
+                        while_fn=_ps2_over,
+                    )
+
+                else:
+                    v1 = f"{p1d['voltage']:.0f}V" if p1d and p1d.get('voltage') else '---V'
+                    w1 = f"{pw1:.0f}W"             if p1d else '---W'
+                    v2 = f"{p2d['voltage']:.0f}V" if p2d and p2d.get('voltage') else '---V'
+                    w2 = f"{pw2:.0f}W"             if p2d else '---W'
+                    _lcd_write(f'PS1 {v1} {w1}', f'PS2 {v2} {w2}')
+                    time.sleep(2)
 
         except Exception as e:
             print(f'[LCD] Loop error: {e}')
-
-        time.sleep(2)
+            time.sleep(2)
 
 
 # ── GPIO setup ────────────────────────────────────────────────────────────────
@@ -328,11 +555,28 @@ def poll_pzem():
             with pzem_lock:
                 pzem_cache['ps1'] = {**data, 'sensor_connected': True, 'error': None}
 
+            # Load sharing SMS — fire when PS1 exceeds user threshold (before hard cut)
+            ps1_power = data['power']
+            ps1_thresh = state['ps1_threshold']
+            if ps1_power > ps1_thresh and not state['ps1_cutoff']:
+                over = ps1_power - ps1_thresh
+                send_sms(
+                    'load_sharing_ps1',
+                    f'LOAD SHARING ACTIVE: PS1 load {ps1_power:.0f}W exceeds {ps1_thresh:.0f}W threshold. '
+                    f'Sharing {over:.0f}W from PS2. - GridSentinel'
+                )
+
             # Auto overload cutoff
             if state['mode'] == 'auto' and data['power'] > OVERLOAD_WATTS:
                 if state['active_source'] == 1 and not state['ps1_cutoff']:
                     cut_power('R5')
                     state['ps1_cutoff'] = True
+                    _save_cutoff_state()
+                    send_sms(
+                        'ps1_cut',
+                        f'ALERT: Transformer 1 (PS1) auto-cut! Load {data["power"]:.0f}W exceeded hard limit. '
+                        f'No output voltage. - GridSentinel'
+                    )
 
         except Exception as e:
             ps1_dev = None
@@ -344,18 +588,37 @@ def poll_pzem():
                     'energy': None, 'frequency': None, 'pf': None, 'alarm': False,
                 }
 
-        # PS2
+        # PS2 — open/read/close each cycle so _ttyS0_lock can be released for GSM SMS
         try:
-            if ps2_dev is None:
-                ps2_dev = open_pzem(PS2_PORT)
-            data = read_pzem(ps2_dev)
+            with _ttyS0_lock:
+                _dev = open_pzem(PS2_PORT)
+                data = read_pzem(_dev)
+                _dev.serial.close()
+            ps2_dev = None   # always None — port is not kept open
             with pzem_lock:
                 pzem_cache['ps2'] = {**data, 'sensor_connected': True, 'error': None}
+
+            # Load sharing SMS for PS2 exceeding threshold
+            ps2_power = data['power']
+            ps2_thresh = state['ps2_threshold']
+            if ps2_power > ps2_thresh and not state['ps2_cutoff']:
+                over2 = ps2_power - ps2_thresh
+                send_sms(
+                    'load_sharing_ps2',
+                    f'LOAD SHARING ACTIVE: PS2 load {ps2_power:.0f}W exceeds {ps2_thresh:.0f}W threshold. '
+                    f'Sharing {over2:.0f}W from PS1. - GridSentinel'
+                )
 
             if state['mode'] == 'auto' and data['power'] > OVERLOAD_WATTS:
                 if state['active_source'] == 2 and not state['ps2_cutoff']:
                     cut_power('R6')
                     state['ps2_cutoff'] = True
+                    _save_cutoff_state()
+                    send_sms(
+                        'ps2_cut',
+                        f'ALERT: Transformer 2 (PS2) auto-cut! Load {data["power"]:.0f}W exceeded hard limit. '
+                        f'No output voltage. - GridSentinel'
+                    )
 
         except Exception as e:
             ps2_dev = None
@@ -377,6 +640,14 @@ def poll_pzem():
             total_capacity = state['ps1_threshold'] + state['ps2_threshold']
 
             if total_load > total_capacity:
+                deficit = total_load - total_capacity
+                send_sms(
+                    'dtr',
+                    f'*** EMERGENCY *** DEPLOY TRANSFORMER NOW! '
+                    f'Combined load {total_load:.0f}W exceeds total capacity {total_capacity:.0f}W. '
+                    f'Deficit: {deficit:.0f}W. Both PS1 and PS2 being cut. '
+                    f'DEPLOY TEMPORARY TRANSFORMER IMMEDIATELY! - GridSentinel'
+                )
                 print(f"[DTR] EMERGENCY! Combined {total_load:.0f}W > capacity {total_capacity}W — cutting BOTH")
                 # Turn off all changeover relays first (stops sockets and bulbs on both sides)
                 for r in ['R1', 'R2', 'R3', 'R4']:
@@ -386,6 +657,7 @@ def poll_pzem():
                 cut_power('R6')
                 state['ps2_cutoff'] = True
                 state['dtr_cutoff'] = True
+                _save_cutoff_state()
 
         time.sleep(2)
 
@@ -482,13 +754,21 @@ def api_cutoff():
     if do_cut:
         cut_power(relay)
         state[key] = True
+        _schedule_restore(relay)           # auto-restore after 15 s
+        send_sms(
+            f'ps{source}_cut',
+            f'ALERT: Transformer {source} (PS{source}) relay cut manually. '
+            f'No output voltage or current on PS{source}. - GridSentinel'
+        )
     else:
+        _cancel_restore(relay)             # user restored manually — cancel timer
         restore_power(relay)
         state[key] = False
         # Clear DTR cutoff lock when user restores any source
         if state['dtr_cutoff']:
             state['dtr_cutoff'] = False
             print("[DTR] Emergency cutoff released by manual restore.")
+    _save_cutoff_state()
 
     return jsonify({'ok': True, 'source': source, 'cut': do_cut})
 
@@ -516,9 +796,12 @@ def api_relay():
         if on:
             cut_power(relay)
             state[key] = True
+            _schedule_restore(relay)       # auto-restore after 15 s
         else:
+            _cancel_restore(relay)         # user restored manually — cancel timer
             restore_power(relay)
             state[key] = False
+        _save_cutoff_state()
 
     return jsonify({'ok': True, 'relay': relay, 'on': on})
 
@@ -554,12 +837,16 @@ def api_ping():
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     gpio_setup()
+    _load_cutoff_state()   # reapply any cutoffs that were active before restart
 
     # Init LCD (optional — server works fine without it)
+    global _lcd
     _lcd = _init_lcd()
     if _lcd:
+        _lcd.clear()
+        time.sleep(0.005)
         _lcd_write('GridSentinel', 'Starting...')
-        time.sleep(1)
+        time.sleep(0.3)   # brief splash — lcd_loop takes over immediately after
 
     # Start PZEM polling in background
     t = threading.Thread(target=poll_pzem, daemon=True)
@@ -570,6 +857,10 @@ if __name__ == '__main__':
     t2.start()
 
     print("GridSentinel Flask server starting on 0.0.0.0:5000")
+    if _HAS_SERIAL:
+        print(f"[GSM] SMS alerts enabled → {ALERT_NUMBER} via {GSM_PORT}")
+    else:
+        print("[GSM] pyserial not found — run: pip3 install pyserial")
     print("Endpoints:")
     print("  GET  /api/status")
     print("  POST /api/switch      { source: 1|2 }")
